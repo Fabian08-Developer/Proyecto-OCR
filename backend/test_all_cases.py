@@ -1,0 +1,154 @@
+import sys
+sys.path.insert(0, '.')
+from app.field_parser import parse_page
+
+tests = [
+    ('Page 36 - LAURA YOLLYS SAENZ TOVAR', """REPUBLICA DE COLOMBIA
+IDENTIFICACION PERSONAL
+CEDULA DECIUDADANIA
+NUMERO
+1.010.206.409
+SAENZTOVAR
+APELLIDOS
+LAURA YOLLYS
+NOMBRES
+FIRMA
+ScannedwithCamScanner""", '1010206409', 'SAENZ TOVAR', 'LAURA YOLLYS'),
+
+    ('Page 30 - MARIA EUGENIA ALDANA VERA', """REPUBLICADECOLOMBIA
+IDENTIFICACIONPERSONAL
+CEDULADECIUDADAMIA
+1.110.461.846
+ALDANAVERA
+MARIA EUGENIA
+AAnnEsnlhnlue
+05-ABR-1987
+FECIHADC NACIMIENTO
+ALGECIRAS
+(HUILA)
+LUGAR DE NACIMIENTO
+1.61
+O+
+F
+ESTATUAA
+GSRH
+SEXO""", '1110461846', 'ALDANA VERA', 'MARIA EUGENIA'),
+
+    ('Page 7 - JEISON BASTIDAS ORTIZ', """REPUBLICADECOLOMBIA
+IDENTIFICACIONPERSONAL
+CEDUDA DE CIUDADANIA
+1.006.521.735
+BASTIDAS ORTIZ
+JEISON.
+JeiSon Bus+idus
+19-DIC-2000
+FECHA DE HACIMIENTO
+MORELIA
+(CAQUETA)
+1.76
+A+
+M
+ESTATUAA
+GS.AH
+SEXO""", '1006521735', 'BASTIDAS ORTIZ', 'JEISON'),
+
+    ('Page 9 - JHON JAMEZ ANDRADE CADENA', """CEDULA DE
+REPUBLICA DE COLOMBIA
+CIUDADANIA
+Apellidos
+NUIP1.127.070.363
+ANDRADE CADENA
+Nombres
+JHON JAMEZ
+Nacionalidad
+Estatura
+Sexo
+COL
+1.66
+M
+Fecha de nacimiento
+GS.
+07JUN 1986
+O-""", '1127070363', 'ANDRADE CADENA', 'JHON JAMEZ'),
+
+    ('Page 17 - JHON FREDDY GOMEZ TORRES', """REPUBLICADECOLOMBIA
+IDENTIFICACIONPERSONAL
+CEDULADECIUDADANIA
+NUMERO
+12.234.223
+GOMEZTORRES
+APELLIDOS
+JHONFREDDY
+NOMBRES
+FIRM
+14-AGO-1968
+FECHADENACIMIENTO""", '12234223', 'GOMEZ TORRES', 'JHON FREDDY'),
+
+    ('Page 20 - ERIKA JULIANA FIERRO GUACA', """OULA DE
+REPUBLICADECOLOMBIA
+UDANANIA
+NUIP1.117.811.433
+FIERRO GUACA
+Nombres
+ERIKAJULIANA
+Naconalidad
+Estatura
+COL
+1.65
+Fecha de nacimiento
+GS
+28 MAR 2006
+O+
+Lugar de nacamiento
+SANVICENTEDELCAGUAN
+(CAQUETA)
+Fecha y.iugar de expedicion
+10ABR2024,SANVICENTEDELCAGUAN""", '1117811433', 'FIERRO GUACA', 'ERIKA JULIANA'),
+
+    ('Page 27 - LIDA YASMIN ALDANA BOHORQUEZ (MRZ)', """0134
+REGISTRADORNACIONAL
+Aiexander Vega Rocha
+ICC0L013470432444001<<<<<<<<<<
+8705080F3302244C0L1117493336<3
+ALDANA<BOHORQUEZ<<LIDAKYASMIN<
+Powered by
+CS
+CamScanner""", '1117493336', 'ALDANA BOHORQUEZ', 'LIDA YASMIN'),
+
+    ('Page 31 - VANESSA ALEXANDRA MURCIA ARTUNDUAGA', """CEDULADE
+REPUBLICADE COLOMBIA
+CIUDADANIA
+Apellidos
+NUIP1.003.806.124
+MURCIAARTUNDUAGA
+Nombres
+VANESSAALEXANDRA
+Nacionalidad
+COL
+1.65
+Fecha de nacimiento
+02NOV 2001
+O+
+0111023F3404089C0L1003806124<1
+MURCIAKARTUNDUAGAKKVANESSKALE""", '1003806124', 'MURCIA ARTUNDUAGA', 'VANESSA ALEXANDRA'),
+]
+
+all_passed = True
+for name, raw, exp_num, exp_ape, exp_nom in tests:
+    res = parse_page(raw)
+    num_ok = (res.numero_documento == exp_num)
+    ape_ok = (res.apellidos == exp_ape)
+    nom_ok = (res.nombres == exp_nom)
+    status = 'PASS' if (num_ok and ape_ok and nom_ok) else 'FAIL'
+    if status == 'FAIL':
+        all_passed = False
+    print(f'[{status}] {name}')
+    print(f'   Num: {res.numero_documento} (expected: {exp_num})')
+    print(f'   Ape: {res.apellidos} (expected: {exp_ape})')
+    print(f'   Nom: {res.nombres} (expected: {exp_nom})')
+    print()
+
+if all_passed:
+    print('=== OVERALL: ALL 8 TEST CASES PASSED PERFECTLY! ===')
+else:
+    print('=== OVERALL: SOME TEST CASES FAILED ===')

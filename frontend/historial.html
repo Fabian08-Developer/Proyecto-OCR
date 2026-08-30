@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Historial · Sistema OCR</title>
+  <link rel="stylesheet" href="style.css?v=3" />
+  <style>
+    .hist-table-wrapper { background: var(--card); border-radius: 0 0 10px 10px; overflow-x: auto; }
+    .hist-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .hist-search {
+      height: 40px;
+      padding: 0 14px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-family: inherit;
+      font-size: 0.9rem;
+      min-width: 260px;
+      background: #fafbfc;
+      color: var(--text);
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    .hist-search:focus {
+      outline: none;
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(31,95,168,0.15);
+      background: white;
+    }
+    .action-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 5px 12px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-family: inherit;
+      white-space: nowrap;
+      transition: all 0.15s;
+    }
+    .action-btn:hover { background: #f1f5f9; border-color: var(--primary); color: var(--primary); }
+    .action-btn.danger { border-color: #fecaca; color: var(--red); }
+    .action-btn.danger:hover { background: #fef2f2; }
+    .action-btn.primary-btn { background: var(--primary); color: white; border-color: var(--primary); }
+    .action-btn.primary-btn:hover { background: var(--primary-dark); }
+    .actions-cell { display: flex; gap: 5px; flex-wrap: wrap; }
+    .badge-sm {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 0.72rem;
+      font-weight: 600;
+    }
+    .hist-empty { text-align: center; padding: 60px 20px; color: var(--muted); }
+    .hist-empty-icon { font-size: 3rem; margin-bottom: 12px; }
+    .loading-hist { text-align: center; padding: 40px; color: var(--muted); }
+    td.num { font-weight: 700; }
+    td.fecha { color: var(--muted); font-size: 0.82rem; white-space: nowrap; }
+    .modal-overlay {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.5);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 1000;
+      padding: 20px;
+    }
+    .modal-overlay.hidden { display: none; }
+    .modal-box {
+      background: white;
+      border-radius: 16px;
+      padding: 28px;
+      max-width: 800px;
+      width: 100%;
+      max-height: 80vh;
+      overflow-y: auto;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    }
+    .modal-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; }
+    .modal-title { font-size: 1.1rem; font-weight: 700; color: var(--text); }
+    .modal-close {
+      background: #f1f5f9; border: none; width: 32px; height: 32px; border-radius: 8px;
+      font-size: 1.1rem; cursor: pointer; display: flex; align-items: center; justify-content: center;
+    }
+    .modal-close:hover { background: #e2e8f0; }
+  </style>
+</head>
+<body>
+  <!-- Navbar -->
+  <nav class="navbar">
+    <div class="nav-brand">
+      <span class="nav-icon">🪪</span>
+      <span>Sistema OCR</span>
+    </div>
+    <div class="nav-links">
+      <a href="/index.html" class="nav-link">Comparar</a>
+      <a href="/historial.html" class="nav-link active">Historial</a>
+    </div>
+    <div class="nav-user">
+      <span class="nav-username" id="nav-username"></span>
+      <button class="btn-logout" id="btn-logout">Cerrar sesión</button>
+    </div>
+  </nav>
+
+  <main>
+    <section id="hist-section">
+      <div class="hist-header">
+        <div>
+          <h2 style="margin:0 0 4px;font-size:1.3rem;color:var(--text)">Historial de Comparaciones</h2>
+          <p style="margin:0;font-size:0.88rem;color:var(--muted)">Tus comparaciones anteriores con archivos originales disponibles para descarga.</p>
+        </div>
+        <input type="text" id="hist-search" class="hist-search" placeholder="Buscar por nombre de archivo o fecha..." />
+      </div>
+
+      <div id="hist-loading" class="loading-hist">
+        <div class="spinner" style="margin:0 auto 12px"></div>
+        <p>Cargando historial...</p>
+      </div>
+
+      <div id="hist-empty" class="hist-empty" style="display:none">
+        <div class="hist-empty-icon">📂</div>
+        <p><strong>No hay comparaciones en el historial.</strong></p>
+        <p style="margin-top:8px;font-size:0.9rem">Las comparaciones que realices se guardarán automáticamente aquí.</p>
+        <a href="/index.html" style="display:inline-block;margin-top:16px;background:var(--primary);color:white;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:600">Ir a comparar</a>
+      </div>
+
+      <div id="hist-table-container" style="display:none">
+        <div class="hist-table-wrapper">
+          <table id="hist-table">
+            <thead>
+              <tr>
+                <th>Fecha</th>
+                <th>PDF</th>
+                <th>Excel</th>
+                <th style="text-align:center">Total</th>
+                <th style="text-align:center">✅</th>
+                <th style="text-align:center">⚠️</th>
+                <th style="text-align:center">❌</th>
+                <th style="text-align:center">Tiempo</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody id="hist-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Modal de confirmacion de eliminacion -->
+  <div class="modal-overlay hidden" id="modal-delete">
+    <div class="modal-box" style="max-width:420px">
+      <div class="modal-header">
+        <div class="modal-title">⚠️ Eliminar comparación</div>
+        <button class="modal-close" id="modal-delete-close">✕</button>
+      </div>
+      <p style="margin-bottom:20px;color:var(--muted)">¿Estás seguro de que deseas eliminar esta comparación del historial? Esta acción no se puede deshacer.</p>
+      <div style="display:flex;gap:10px;justify-content:flex-end">
+        <button class="action-btn" id="modal-cancel">Cancelar</button>
+        <button class="action-btn danger" id="modal-confirm-delete" style="background:#fef2f2">Eliminar</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="historial.js"></script>
+</body>
+</html>
