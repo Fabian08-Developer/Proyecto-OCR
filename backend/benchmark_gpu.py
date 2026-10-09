@@ -6,21 +6,24 @@ Uso:
     python benchmark_gpu.py [archivo.pdf] [--paginas N] [--dpi D] [--gpu-id I]
 
 Por defecto usa las primeras 6 páginas del PDF de ejemplo del proyecto, al
-mismo DPI que el sistema (300). Al final indica qué configuración conviene.
+mismo DPI que el sistema (300) y leyendo OCR_TRABAJADORES páginas a la vez,
+como el servidor. Al final indica qué configuración conviene.
 """
 
 from __future__ import annotations
 
 import argparse
 import difflib
+import queue
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import numpy as np
 
-from app.ocr_engine import crear_motor, directml_disponible, pdf_to_images
+from app.ocr_engine import OCR_TRABAJADORES, crear_motor, directml_disponible, pdf_to_images
 
 PDF_EJEMPLO = Path(__file__).parent.parent / "DOCUMENTACION PARTICIPANTES 3574135 (1).pdf"
 
@@ -33,12 +36,22 @@ CONFIGURACIONES = [
 ]
 
 
-def ocr_paginas(motor, imagenes):
-    textos = []
-    for img in imagenes:
-        result, _ = motor(img)
-        textos.append("\n".join(t for _, t, _ in result) if result else "")
-    return textos
+def ocr_paginas(motores, imagenes):
+    """Lee las páginas repartidas entre los motores (uno por hilo), como extract_pdf."""
+    libres = queue.Queue()
+    for motor in motores:
+        libres.put(motor)
+
+    def leer(img):
+        motor = libres.get()
+        try:
+            result, _ = motor(img)
+        finally:
+            libres.put(motor)
+        return "\n".join(t for _, t, _ in result) if result else ""
+
+    with ThreadPoolExecutor(max_workers=len(motores)) as ejecutor:
+        return list(ejecutor.map(leer, imagenes))
 
 
 def main() -> int:
@@ -49,7 +62,7 @@ def main() -> int:
     ap.add_argument("--gpu-id", type=int, default=None, help="adaptador DirectML (por defecto: el de alto rendimiento)")
     args = ap.parse_args()
 
-    print(f"PDF: {Path(args.pdf).name}  |  páginas: {args.paginas}  |  DPI: {args.dpi}")
+    print(f"PDF: {Path(args.pdf).name}  |  páginas: {args.paginas}  |  DPI: {args.dpi}  |  a la vez: {OCR_TRABAJADORES}")
     imagenes = [np.array(img) for img in pdf_to_images(Path(args.pdf).read_bytes(), dpi=args.dpi)[: args.paginas]]
 
     configs = CONFIGURACIONES if directml_disponible() else CONFIGURACIONES[:1]
@@ -61,10 +74,11 @@ def main() -> int:
     for nombre, modulos in configs:
         print(f"\n[{nombre}] cargando...", flush=True)
         try:
-            motor = crear_motor(modulos, args.gpu_id)
-            motor(imagenes[0])  # calentamiento: la GPU compila los modelos en la 1a pasada
+            motores = [crear_motor(modulos, args.gpu_id) for _ in range(OCR_TRABAJADORES)]
+            for motor in motores:
+                motor(imagenes[0])  # calentamiento: la GPU compila los modelos en la 1a pasada
             t0 = time.perf_counter()
-            textos = ocr_paginas(motor, imagenes)
+            textos = ocr_paginas(motores, imagenes)
             seg = (time.perf_counter() - t0) / len(imagenes)
         except Exception as e:
             print(f"[{nombre}] FALLÓ: {e}")

@@ -7,8 +7,12 @@ Funciones:
 """
 from __future__ import annotations
 
+import logging
 import os
+import secrets
+import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, HTTPException, status
@@ -22,8 +26,58 @@ from .database import Usuario, get_db
 # Configuracion JWT
 # ---------------------------------------------------------------------------
 
-# En produccion, usa una variable de entorno para SECRET_KEY
-SECRET_KEY = os.environ.get("OCR_SECRET_KEY", "ocr-system-super-secret-key-2024-cambiar-en-produccion")
+logger = logging.getLogger("ocr_system")
+
+# Clave que traían las versiones anteriores: estuvo en un repositorio público, así que
+# cualquiera puede firmar tokens con ella. Se rechaza aunque alguien la configure a propósito.
+CLAVE_PUBLICA_ANTIGUA = "ocr-system-super-secret-key-2024-cambiar-en-produccion"
+MIN_LARGO_CLAVE = 32
+_ARCHIVO_CLAVE = Path(__file__).resolve().parent.parent / ".ocr_secret_key"
+
+
+def cargar_clave_firma(valor_entorno: Optional[str], archivo: Path) -> str:
+    """
+    Clave con la que se firman los JWT:
+      1. Variable de entorno OCR_SECRET_KEY (recomendado en producción).
+      2. Si no existe, un archivo local (backend/.ocr_secret_key, fuera de git) con una clave
+         aleatoria generada la primera vez. La creación es atómica: con varios workers todos
+         terminan usando la misma clave.
+    Nunca se usa una clave conocida ni corta: en ese caso se aborta el arranque.
+    """
+    if valor_entorno:
+        if valor_entorno == CLAVE_PUBLICA_ANTIGUA or len(valor_entorno) < MIN_LARGO_CLAVE:
+            raise RuntimeError(
+                f"OCR_SECRET_KEY no es segura: debe tener al menos {MIN_LARGO_CLAVE} caracteres y no puede ser "
+                "la clave de ejemplo. Genera una con:  python -c \"import secrets; print(secrets.token_urlsafe(48))\""
+            )
+        return valor_entorno
+
+    try:
+        fd = os.open(str(archivo), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        fd = None
+
+    if fd is not None:                                   # este proceso creó el archivo
+        clave = secrets.token_urlsafe(48)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(clave)
+        logger.warning(
+            "OCR_SECRET_KEY no está definida: se generó una clave de firma aleatoria en %s "
+            "(se reutiliza en los próximos arranques; las sesiones se invalidan si la borras).", archivo
+        )
+        return clave
+
+    for _ in range(40):                                  # otro proceso la está escribiendo: esperar
+        clave = archivo.read_text(encoding="utf-8").strip()
+        if len(clave) >= MIN_LARGO_CLAVE:
+            return clave
+        time.sleep(0.05)
+    raise RuntimeError(
+        f"El archivo de clave {archivo} está vacío o es demasiado corto. Bórralo para que se genere uno nuevo."
+    )
+
+
+SECRET_KEY = cargar_clave_firma(os.environ.get("OCR_SECRET_KEY"), _ARCHIVO_CLAVE)
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 8   # sesion de 8 horas
 

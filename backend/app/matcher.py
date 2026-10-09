@@ -29,9 +29,16 @@ from typing import Dict, List, Optional
 
 from .document_grouper import DocumentRecord
 from .excel_reader import ExcelParticipant
-from .field_parser import normalize_for_match
+from .field_parser import digit_differences, normalize_for_match
 
 NAME_MATCH_THRESHOLD = 0.72
+
+# Tope de la similitud mostrada cuando los nombres no son idénticos (ver _name_similarity)
+MAX_SIMILARITY_IF_DIFFERENT = 0.99
+
+# Un número del PDF que difiere en pocos dígitos de uno del Excel y trae un nombre similar
+# suele ser un dígito mal leído por el OCR: se avisa en las observaciones (no se empareja solo).
+MAX_DIGIT_DIFF_HINT = 2
 
 
 def _token_is_contained(token: str, candidates: set) -> bool:
@@ -104,7 +111,24 @@ def _name_similarity(name_a: Optional[str], name_b: Optional[str]) -> float:
     else:
         boosted = base_score
 
+    # El 100 % es solo para nombres idénticos: con una letra distinta (ALEXANDEA vs ALEXANDER) el
+    # boost y la coincidencia parcial no pueden aparentar una lectura perfecta.
+    if not names_are_identical(name_a, name_b):
+        boosted = min(boosted, MAX_SIMILARITY_IF_DIFFERENT)
+
     return boosted
+
+
+def names_are_identical(name_a: Optional[str], name_b: Optional[str]) -> bool:
+    """
+    True si ambos nombres tienen exactamente las mismas letras, sin importar tildes, mayúsculas,
+    espacios (el OCR pega o separa palabras) ni el orden de las palabras.
+    """
+    tokens_a = normalize_for_match(name_a or "").split()
+    tokens_b = normalize_for_match(name_b or "").split()
+    if not tokens_a or not tokens_b:
+        return False
+    return "".join(tokens_a) == "".join(tokens_b) or sorted(tokens_a) == sorted(tokens_b)
 
 
 def _normalize_id(num: Optional[str]) -> Optional[str]:
@@ -135,6 +159,40 @@ class MatchResult:
 
 
 REQUIRED_FIELDS_FOR_COMPLETE = ["fecha_nacimiento", "apellidos", "nombres"]
+
+
+def _add_misread_hints(
+    results: List[MatchResult], participants: List[ExcelParticipant], sobrante_docs: List[DocumentRecord]
+) -> None:
+    """
+    A cada participante "no encontrado" le agrega una observación si algún documento sobrante del
+    PDF tiene un número casi idéntico (1-2 dígitos de diferencia) y un nombre similar.
+    No cambia el estado: la decisión final es de quien revisa.
+    """
+    by_number = {p.numero_documento: p for p in participants}
+    for r in results:
+        if r.estado != "no_encontrado_en_pdf":
+            continue
+        participante = by_number.get(r.numero_documento)
+        if participante is None:
+            continue
+        best = None  # (similitud, diferencias, doc)
+        for doc in sobrante_docs:
+            diff = digit_differences(participante.numero_documento, doc.numero_documento)
+            if diff is None or not 1 <= diff <= MAX_DIGIT_DIFF_HINT:
+                continue
+            sim = _name_similarity(participante.nombre_reportado, doc.fields.nombre_completo)
+            if sim >= NAME_MATCH_THRESHOLD and (best is None or (sim, -diff) > (best[0], -best[1])):
+                best = (sim, diff, doc)
+        if best:
+            sim, diff, doc = best
+            paginas = ", ".join(str(n) for n in doc.source_pages)
+            r.observaciones = (
+                f"{r.observaciones} POSIBLE COINCIDENCIA: el PDF trae un documento (página {paginas}) con el "
+                f"número {doc.numero_documento}, que difiere en {diff} dígito(s) del número del Excel, y un "
+                f"nombre similar ('{doc.fields.nombre_completo}'). Probable dígito mal leído por el OCR; "
+                f"verificar manualmente."
+            )
 
 
 def compare(
@@ -184,7 +242,13 @@ def compare(
 
         missing = [f for f in REQUIRED_FIELDS_FOR_COMPLETE if not getattr(doc.fields, f)]
 
-        if similarity < NAME_MATCH_THRESHOLD:
+        if not p.nombre_reportado:
+            estado = "nombre_no_coincide"
+            obs = (
+                "El Excel no trae nombre para este participante: se encontró el documento "
+                "pero no se pudo validar que el nombre corresponda."
+            )
+        elif similarity < NAME_MATCH_THRESHOLD:
             estado = "nombre_no_coincide"
             obs = (
                 f"El nombre del Excel ('{p.nombre_reportado}') no coincide "
@@ -197,6 +261,12 @@ def compare(
         else:
             estado = "coincide"
             obs = None
+            if not names_are_identical(p.nombre_reportado, doc.fields.nombre_completo):
+                obs = (
+                    f"Nombre no idéntico (Excel '{p.nombre_reportado}', OCR '{doc.fields.nombre_completo}'); "
+                    f"el número sí coincide. Confirmar en la cédula: puede ser una letra mal leída por el "
+                    f"OCR o una diferencia de escritura en el Excel."
+                )
 
         results.append(
             MatchResult(
@@ -209,11 +279,12 @@ def compare(
             )
         )
 
-    sobrantes = [
-        doc.to_dict()
-        for doc in documents
+    sobrante_docs = [
+        doc for doc in documents
         if doc.numero_documento and doc.numero_documento not in matched_ocr_ids
     ]
+    _add_misread_hints(results, participants, sobrante_docs)
+    sobrantes = [doc.to_dict() for doc in sobrante_docs]
     sin_numero = [doc.to_dict() for doc in documents if not doc.numero_documento]
 
     resumen = {

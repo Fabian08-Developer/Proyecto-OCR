@@ -11,6 +11,7 @@ Soporta:
 
 from __future__ import annotations
 
+import difflib
 import re
 import unicodedata
 from dataclasses import dataclass, asdict
@@ -196,6 +197,31 @@ COLOMBIAN_NAMES_LEXICON = {
 
 _SORTED_NAMES_LEXICON = sorted(COLOMBIAN_NAMES_LEXICON, key=len, reverse=True)
 
+_PARTICULAS_NOMBRE = {"DE", "LA", "HOZ"}  # "DELAHOZ" -> "DE LA HOZ"
+_SIMILITUD_PALABRA_CONOCIDA = 0.85  # ratio mínimo para considerar que una palabra es un nombre conocido mal leído
+_MIN_LETRAS_PIEZA_DESCONOCIDA = 4
+
+
+def palabras_conocidas_cercanas(palabra: str) -> List[str]:
+    """
+    Nombres del léxico (6+ letras) a los que una palabra se parece mucho sin ser iguales: señal de un
+    nombre conocido mal leído (ALEXANDEA ~ ALEXANDER). Lista vacía si la palabra ya está en el léxico.
+    """
+    palabra = palabra.upper()
+    if len(palabra) < 6 or palabra in COLOMBIAN_NAMES_LEXICON:
+        return []
+    cercanas = []
+    for w in COLOMBIAN_NAMES_LEXICON:
+        if len(w) < 6:
+            continue
+        comparador = difflib.SequenceMatcher(None, palabra, w)
+        # los dos primeros filtros son cotas baratas: descartan casi todo sin calcular el ratio
+        if (comparador.real_quick_ratio() >= _SIMILITUD_PALABRA_CONOCIDA
+                and comparador.quick_ratio() >= _SIMILITUD_PALABRA_CONOCIDA
+                and comparador.ratio() >= _SIMILITUD_PALABRA_CONOCIDA):
+            cercanas.append(w)
+    return sorted(cercanas)
+
 
 def split_concatenated_name(name: str) -> str:
     """
@@ -222,21 +248,47 @@ def split_concatenated_name(name: str) -> str:
         prefix = name_upper[:-7]
         return f"{split_concatenated_name(prefix)} DE LA HOZ"
 
+    # Una palabra que es casi un nombre conocido (ALEXANDEA ~ ALEXANDER, con la R tapada por la marca
+    # de agua) es una sola palabra mal leída, no dos pegadas: cortarla inventaría "ALEX ANDEA".
+    if palabras_conocidas_cercanas(name_upper):
+        return name
+
+    def _piezas_plausibles(texto: str) -> bool:
+        # La pieza que no está en el lexicón (apellidos poco comunes) debe parecer una palabra: un
+        # resto de 1-3 letras ("JUAN"+"ITA", "ANGEL"+"ICA") es el final de otro nombre, no un nombre.
+        return all(
+            p in COLOMBIAN_NAMES_LEXICON or p in _PARTICULAS_NOMBRE or len(p) >= _MIN_LETRAS_PIEZA_DESCONOCIDA
+            for p in texto.split()
+        )
+
     # Buscar coincidencia por prefijo en el lexicón
     for w in _SORTED_NAMES_LEXICON:
         if name_upper.startswith(w) and len(name_upper) >= len(w) + 3:
-            rest = name_upper[len(w):]
-            rest_split = split_concatenated_name(rest)
-            return f"{w} {rest_split}"
+            rest_split = split_concatenated_name(name_upper[len(w):])
+            if _piezas_plausibles(rest_split):
+                return f"{w} {rest_split}"
 
     # Buscar coincidencia por sufijo en el lexicón
     for w in _SORTED_NAMES_LEXICON:
         if name_upper.endswith(w) and len(name_upper) >= len(w) + 3:
-            first = name_upper[:-len(w)]
-            first_split = split_concatenated_name(first)
-            return f"{first_split} {w}"
+            first_split = split_concatenated_name(name_upper[:-len(w)])
+            if _piezas_plausibles(first_split):
+                return f"{first_split} {w}"
 
     return name
+
+
+# La cédula clásica trae "REPUBLICA DE COLOMBIA" como marca de agua sobre los campos: el OCR la lee
+# mal (COLONBI, COLOMBI, REPUBLI...) y esa palabra no puede pasar por un nombre.
+_MARCAS_DE_AGUA = ("colombia", "republica")
+_PARECIDOS_PERMITIDOS = {"colombo"}  # apellido real, aunque se parezca a "colombia"
+
+
+def _parece_marca_de_agua(palabra: str) -> bool:
+    """True si una palabra (ya normalizada) es una lectura deformada de COLOMBIA o REPUBLICA."""
+    if not 5 <= len(palabra) <= 10 or not palabra.isalpha() or palabra in _PARECIDOS_PERMITIDOS:
+        return False
+    return any(difflib.SequenceMatcher(None, palabra, marca).ratio() >= 0.8 for marca in _MARCAS_DE_AGUA)
 
 
 def is_header_or_stopword(text: str) -> bool:
@@ -245,6 +297,8 @@ def is_header_or_stopword(text: str) -> bool:
     if not norm:
         return True
     if norm in STOP_WORDS_NAME:
+        return True
+    if _parece_marca_de_agua(norm):
         return True
     header_roots = (
         "republica", "colombia", "colombla", "colomla", "columbia",
@@ -292,6 +346,10 @@ def clean_name_line(line: str) -> Optional[str]:
 
     # Filtrar líneas que son claramente ruido OCR o encabezados
     if is_likely_noise(line) or is_header_or_stopword(line):
+        return None
+
+    # Una línea con una fecha ("04-ABR-1982", "12-JUN-2000 ELPAUJIL") nunca es un nombre
+    if re.search(r"\d", line) and normalize_date(line):
         return None
 
     # Si la línea normalizada es exactamente una variante de etiqueta (ej: "APELLDOS", "NOMBRES"), descartar
@@ -470,14 +528,66 @@ def normalize_date(raw: str) -> Optional[str]:
 
 DOC_NUMBER_RE = re.compile(r"\b(\d{1,3}(?:[.:]\d{3}){1,4}|\d{6,12})\b")
 
+# Número con separadores de miles (1.110.487.315): así viene impreso en el frente de la cédula.
+DOC_NUMBER_DOTTED_RE = re.compile(r"\b(\d{1,3}(?:\.\d{3}){1,4})\b")
 
-def clean_document_number(raw: str) -> Optional[str]:
+# Línea del código de barras del reverso clásico: A-4400100-00686192-M-0096333300-20150411.
+# El OCR suele confundir la letra del sexo, por eso se acepta cualquier letra/dígito en ese campo.
+BARCODE_LIKE_RE = re.compile(
+    r"(?<![A-Z0-9])[A-Z0-9]-\d{5,8}-\d{5,9}-[A-Z0-9]-\d{6,12}-\d{6,8}(?!\d)"
+)
+
+# Fechas que no deben confundirse con un número de documento: 28-JUL-1999, 10ABR2024, 05/04/1987, 1987-04-05.
+_DATE_TEXT_STRIP_RE = re.compile(
+    r"(?<!\d)(\d{1,2})\s*(?:DE|[-/.])?\s*([A-Za-zÁÉÍÓÚáéíóú]{3,10})\s*(?:DE|[-/.])?\s*(\d{2,4})(?!\d)",
+    re.IGNORECASE,
+)
+_DATE_ISO_STRIP_RE = re.compile(r"(?<!\d)\d{4}[/\-.]\d{1,2}[/\-.]\d{1,2}(?!\d)")
+_DATE_NUM_STRIP_RE = re.compile(r"(?<!\d)\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}(?!\d)")
+
+
+def _strip_dates(text: str) -> str:
+    """Reemplaza por espacios las fechas reconocibles para que sus dígitos no pasen por número de documento."""
+    def _text_date(m: "re.Match") -> str:
+        mon = strip_accents(m.group(2).lower())
+        return " " if (MESES.get(mon) or MESES.get(mon[:3])) else m.group(0)
+
+    text = _DATE_TEXT_STRIP_RE.sub(_text_date, text)
+    text = _DATE_ISO_STRIP_RE.sub(" ", text)
+    return _DATE_NUM_STRIP_RE.sub(" ", text)
+
+
+def digit_differences(a: Optional[str], b: Optional[str]) -> Optional[int]:
+    """
+    Cantidad de dígitos distintos entre dos números de documento de igual longitud
+    (ignorando ceros iniciales). None si no son comparables (vacíos o de distinta longitud).
+    Sirve para detectar un dígito mal leído por el OCR (ej: ...266.865 leído como ...265.865).
+    """
+    if not a or not b:
+        return None
+    a, b = a.lstrip("0"), b.lstrip("0")
+    if not a or len(a) != len(b):
+        return None
+    return sum(x != y for x, y in zip(a, b))
+
+
+def clean_document_number(raw: str, strict: bool = False) -> Optional[str]:
     """
     Limpia y valida un número de cédula/TI o contraseña (6 a 12 dígitos).
     Maneja variaciones OCR con dos puntos o comas (ej: 1:117.513.499),
     y remueve prefijos pegados de etiquetas oficiales (NUMER0, UMO, NUIP, etc.).
+
+    Nunca devuelve dígitos tomados de una fecha, de la línea del código de barras
+    ni de códigos alfanuméricos (ej: "0043842199A1").
+
+    strict=True se usa al buscar el número SIN una etiqueta que lo respalde
+    ("NUMERO", "NUIP"): solo se acepta el formato impreso con separadores de miles.
     """
     if not raw:
+        return None
+
+    # La línea del código de barras trae varios números; ninguno es el número impreso del frente.
+    if BARCODE_LIKE_RE.search(raw.upper()):
         return None
 
     # Quitar prefijos de etiquetas conocidos que puedan estar pegados al número
@@ -487,8 +597,19 @@ def clean_document_number(raw: str) -> Optional[str]:
         raw.strip()
     )
 
+    # Las fechas (28-JUL-1999, 10ABR2024...) no son números de documento
+    cleaned = _strip_dates(cleaned)
+
     # Normalizar dos puntos o comas entre dígitos a puntos (ej: 1:117.513.499 -> 1.117.513.499)
     cleaned = re.sub(r"(\d)[:\,](\d)", r"\1.\2", cleaned)
+
+    if strict:
+        m = DOC_NUMBER_DOTTED_RE.search(cleaned)
+        if m:
+            digits = re.sub(r"[^\d]", "", m.group(1))
+            if 6 <= len(digits) <= 12:
+                return digits
+        return None
 
     m = DOC_NUMBER_RE.search(cleaned)
     if m:
@@ -496,9 +617,12 @@ def clean_document_number(raw: str) -> Optional[str]:
         if 6 <= len(digits) <= 12:
             return digits
 
-    digits = re.sub(r"[^\d]", "", cleaned)
-    if 6 <= len(digits) <= 12:
-        return digits
+    # Último recurso: dígitos separados por espacios/puntos ("1 110 487 315"). Si la línea
+    # mezcla letras, juntar sus dígitos inventaría un número (ej: "0043842199A1").
+    if re.fullmatch(r"[\d.\s:,\-]+", cleaned.strip() or "x"):
+        digits = re.sub(r"[^\d]", "", cleaned)
+        if 6 <= len(digits) <= 12:
+            return digits
 
     return None
 
@@ -554,6 +678,9 @@ class ParsedFields:
     fecha_expiracion: Optional[str] = None
     nacionalidad: Optional[str] = None
     fuente: Optional[str] = None  # "frente_clasico" | "reverso_clasico" | "frente_nuevo" | "mrz"
+    # True si numero_documento salió de un MRZ cuyo dígito de control compuesto (ICAO 9303) validó:
+    # es la lectura más confiable del número y gana sobre la del frente cuando difieren.
+    numero_verificado: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -571,7 +698,7 @@ class ParsedFields:
         """
         merged = ParsedFields(**self.to_dict())
         for key, value in other.to_dict().items():
-            if key == "fuente":
+            if key in ("fuente", "numero_verificado"):
                 continue
             if not value:
                 continue
@@ -580,13 +707,22 @@ class ParsedFields:
                 # Sin valor actual -> usar el nuevo
                 setattr(merged, key, value)
             elif key == "numero_documento":
-                # Para numero de documento: preferir el mas largo (mas digitos)
-                import re as _re
-                digits_current = _re.sub(r"[^\d]", "", str(current))
-                digits_new = _re.sub(r"[^\d]", "", str(value))
-                if len(digits_new) > len(digits_current):
+                if other.numero_verificado and not self.numero_verificado:
+                    # Un número validado por el checksum del MRZ gana sobre uno sin validar
                     setattr(merged, key, value)
+                elif not self.numero_verificado:
+                    # Sin validación de por medio: preferir el mas largo (mas digitos)
+                    import re as _re
+                    digits_current = _re.sub(r"[^\d]", "", str(current))
+                    digits_new = _re.sub(r"[^\d]", "", str(value))
+                    if len(digits_new) > len(digits_current):
+                        setattr(merged, key, value)
             # Para otros campos: mantener el primero (ya establecido)
+        # La marca de verificación acompaña al número que quedó
+        merged.numero_verificado = bool(
+            (self.numero_verificado and merged.numero_documento == self.numero_documento)
+            or (other.numero_verificado and merged.numero_documento == other.numero_documento)
+        )
         fuentes = {f for f in [self.fuente, other.fuente] if f}
         merged.fuente = "+".join(sorted(fuentes)) if fuentes else None
         return merged
@@ -698,19 +834,27 @@ def parse_classic_front(lines: List[str]) -> ParsedFields:
                 if doc_num:
                     pf.numero_documento = doc_num
                     break
+            # En muchas lecturas el valor sale ANTES de su etiqueta ("1.005.995.167" y luego "NUMERO")
+            if not pf.numero_documento:
+                for j in range(idx_num - 1, max(idx_num - 3, -1), -1):
+                    doc_num = clean_document_number(lines[j])
+                    if doc_num:
+                        pf.numero_documento = doc_num
+                        break
 
-    # Si no se encontró por etiqueta, buscar en las primeras 6 líneas
+    # Si no se encontró por etiqueta, buscar en las primeras 6 líneas.
+    # Sin etiqueta que lo respalde solo se acepta el formato impreso (1.110.487.315).
     if not pf.numero_documento:
         for line in lines[:6]:
-            doc_num = clean_document_number(line)
+            doc_num = clean_document_number(line, strict=True)
             if doc_num:
                 pf.numero_documento = doc_num
                 break
 
-    # Búsqueda general en cualquier línea
+    # Búsqueda general en cualquier línea (también estricta)
     if not pf.numero_documento:
         for line in lines:
-            doc_num = clean_document_number(line)
+            doc_num = clean_document_number(line, strict=True)
             if doc_num:
                 pf.numero_documento = doc_num
                 break
@@ -1009,6 +1153,88 @@ MRZ_LINE2_RE = re.compile(
 )
 
 
+_MRZ_WEIGHTS = (7, 3, 1)
+MRZ_LINE2_STRICT_RE = re.compile(r"(\d{6})(\d)([MF<])(\d{6})(\d)([A-Z]{3})([0-9<]{11})(\d)")
+
+
+def _mrz_check_digit(data: str) -> Optional[int]:
+    """Dígito de control ICAO 9303: pesos 7-3-1; dígitos valen su cifra, '<' vale 0 y A-Z valen 10-35."""
+    total = 0
+    for i, c in enumerate(data):
+        if c.isdigit():
+            v = int(c)
+        elif c == "<":
+            v = 0
+        elif "A" <= c <= "Z":
+            v = ord(c) - 55
+        else:
+            return None
+        total += v * _MRZ_WEIGHTS[i % 3]
+    return total % 10
+
+
+def verify_mrz_number(lines: List[str], numero: str) -> Optional[bool]:
+    """
+    Valida con el dígito de control compuesto del MRZ (TD1) que `numero` fue bien leído.
+
+    En la cédula colombiana el número viaja en el campo opcional de la 2ª línea y el dígito
+    compuesto cubre las líneas 1 y 2: un solo dígito mal leído lo invalida (los pesos 7, 3 y 1
+    son invertibles módulo 10).
+
+    Devuelve True si valida, False si no valida, None si no se pudo evaluar (el OCR no entregó
+    las dos líneas completas de 30 caracteres).
+    """
+    norm = [re.sub(r"[^A-Z0-9<]", "", l.upper()).replace("C0L", "COL") for l in lines]
+    for i, l2 in enumerate(norm):
+        m = MRZ_LINE2_STRICT_RE.fullmatch(l2) if len(l2) == 30 else None
+        if not m or m.group(7).split("<")[0] != numero:
+            continue
+        if i == 0 or len(norm[i - 1]) != 30:
+            return None
+        composite = norm[i - 1][5:30] + l2[0:7] + l2[8:15] + l2[18:29]
+        check = _mrz_check_digit(composite)
+        return None if check is None else check == int(m.group(8))
+    return None
+
+
+def _k_de_relleno_a_signo(linea: str, frente: str = "") -> str:
+    """
+    El OCR suele leer el relleno "<" del MRZ como "K" ('MOSQUERAK<BRAYAN<STIVENK', 'LIDAKYASMIN'), pero
+    hay nombres con K real (WILKIN, ERIKA, NICKOLAS, KEVIN). Decide cuáles K se conservan:
+      - `frente`: letras del resto de la página (las etiquetas de la cédula no llevan K). Si la palabra
+        completa con su K aparece ahí, la K es parte del nombre.
+      - Sin esa evidencia, una K entre letras se toma como separador solo si las dos piezas son
+        palabras de 3+ letras (LIDA|YASMIN); si no (WIL|IN, ERI|A) es una K real.
+      - Una K pegada a otra K, a un "<" o al borde de la línea es relleno.
+    """
+    def es_letra(ch: str) -> bool:
+        return ch.isalpha() and ch != "K"
+
+    n = len(linea)
+    salida = []
+    for i, c in enumerate(linea):
+        if c != "K":
+            salida.append(c)
+            continue
+        izq, j = "", i - 1
+        while j >= 0 and es_letra(linea[j]):
+            izq, j = linea[j] + izq, j - 1
+        der, j = "", i + 1
+        while j < n and es_letra(linea[j]):
+            der, j = der + linea[j], j + 1
+
+        palabra = f"{izq}K{der}"
+        if not izq and not der:
+            salida.append("<")                              # K suelta o junto a otras K / signos
+        elif len(palabra) >= 4 and palabra in frente:
+            salida.append("K")                              # impresa en el frente: es del nombre
+        elif izq and der:
+            salida.append("<" if len(izq) >= 3 and len(der) >= 3 else "K")
+        else:
+            salida.append("<")                              # K al borde de una palabra: relleno
+    return "".join(salida)
+
+
 def parse_mrz(lines: List[str]) -> Optional[ParsedFields]:
     """Parsea el bloque MRZ ICAO TD1 del reverso de cédulas digitales."""
     # Buscar en lineas individuales primero (mas preciso)
@@ -1025,6 +1251,7 @@ def parse_mrz(lines: List[str]) -> Optional[ParsedFields]:
     birth, sex, expiry, nat, docnum = m2.groups()
     pf = ParsedFields(fuente="mrz")
     pf.numero_documento = docnum  # Preservar numero exacto del MRZ
+    pf.numero_verificado = verify_mrz_number(lines, docnum) is True
     pf.sexo = None if sex == "<" else sex
     pf.nacionalidad = nat
 
@@ -1052,8 +1279,12 @@ def parse_mrz(lines: List[str]) -> Optional[ParsedFields]:
     mrz_name_line = None
     for line in lines:
         line_up = line.strip().upper()
-        # Reemplazar K por < para detectar lineas MRZ donde OCR confundio < con K
-        line_norm = line_up.replace("K", "<")
+        # Letras del resto de la página (el frente de la cédula): evidencia de qué K son del nombre
+        frente = "" if "K" not in line_up else "".join(
+            re.sub(r"[^A-Z]", "", other.upper()) for other in lines if other is not line and "<" not in other
+        )
+        # Reemplazar la K que en realidad es un < mal leído (ver _k_de_relleno_a_signo)
+        line_norm = _k_de_relleno_a_signo(line_up, frente)
         # Una linea MRZ de nombres debe tener << y ser mayormente letras y <
         if "<<" in line_norm:
             alpha_and_fill = sum(1 for c in line_norm if c.isalpha() or c == "<")
@@ -1110,6 +1341,32 @@ def _parse_mrz_line(mrz_text: str) -> dict:
     return result
 
 
+# Palabras impresas solo en el FRENTE de la cédula / tarjeta de identidad.
+_FRONT_MARKERS = (
+    "republica", "ciudadania", "cedula", "identificacion", "nuip", "apellido", "nombres",
+    "numero", "tarjeta", "identidad", "contrasena", "comprobante", "primeravez",
+)
+# Palabras impresas solo en el REVERSO (junto a la firma del Registrador).
+_BACK_MARKERS = ("registrador", "indicederecho", "indice derecho")
+
+
+def _is_back_only_page(raw_text: str, norm_full: str, mrz: Optional[ParsedFields]) -> bool:
+    """
+    True si la página es únicamente el reverso de una cédula: trae código de barras,
+    zona MRZ o textos propios del reverso y ninguna palabra del frente.
+
+    A estas páginas NO se les debe aplicar el parser de frente: sus fallbacks inventan
+    nombres (incluido el del Registrador Nacional) y números a partir de fechas o pies de página.
+    """
+    if any(m in norm_full for m in _FRONT_MARKERS):
+        return False
+    return (
+        bool(mrz)
+        or bool(BARCODE_LIKE_RE.search(raw_text.upper()))
+        or any(m in norm_full for m in _BACK_MARKERS)
+    )
+
+
 def parse_page(raw_text: str) -> ParsedFields:
     """Parsea el texto plano extraído de una página e intenta todos los formatos."""
     if not raw_text:
@@ -1117,6 +1374,21 @@ def parse_page(raw_text: str) -> ParsedFields:
 
     lines = [l.strip() for l in raw_text.splitlines() if l.strip()]
     norm_full = normalize_for_match(raw_text)
+    mrz = parse_mrz(lines)
+
+    # 0. Página que es solo reverso: únicamente parsers de reverso
+    if _is_back_only_page(raw_text, norm_full, mrz):
+        back_results: List[ParsedFields] = []
+        if "nacimiento" in norm_full or "expedicion" in norm_full or BARCODE_LIKE_RE.search(raw_text.upper()):
+            back_results.append(parse_classic_back(lines))
+        if mrz:
+            back_results.append(mrz)
+        if not back_results:
+            return ParsedFields(fuente="sin_datos")
+        back_merged = back_results[0]
+        for r in back_results[1:]:
+            back_merged = back_merged.merge(r)
+        return back_merged
 
     results: List[ParsedFields] = []
 
@@ -1138,7 +1410,7 @@ def parse_page(raw_text: str) -> ParsedFields:
         or "primeravez" in norm_full
         or "nuip" in norm_full
         or any(v in norm_full for v in ("apell", "nomb", "apel", "nom", "korahe"))
-        or any(clean_document_number(l) is not None for l in lines[:6])
+        or any(clean_document_number(l, strict=True) is not None for l in lines[:6])
     )
     if is_front and not is_new:
         results.append(parse_classic_front(lines))
@@ -1148,7 +1420,6 @@ def parse_page(raw_text: str) -> ParsedFields:
         results.append(parse_classic_back(lines))
 
     # 4. Zona MRZ
-    mrz = parse_mrz(lines)
     if mrz:
         results.append(mrz)
 
