@@ -14,7 +14,7 @@ from .auth import get_current_user
 from .database import Comparacion, Usuario, get_db, get_storage_dir, init_db
 from .document_grouper import group_pages_into_documents
 from .excel_reader import parse_excel_report
-from .ocr_engine import extract_pdf
+from .ocr_engine import dispositivo_ocr, extract_pdf
 from .routers import auth_router, historial_router
 from sqlalchemy.orm import Session
 
@@ -62,7 +62,7 @@ def _read_upload(file: UploadFile, max_mb: int) -> bytes:
 # ---------------------------------------------------------------------------
 @app.get("/api/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "ocr_dispositivo": dispositivo_ocr()}
 
 
 @app.post("/api/extract-pdf")

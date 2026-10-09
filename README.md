@@ -73,6 +73,29 @@ propio backend sirve el frontend.
 La primera ejecución de OCR también descargará los modelos ONNX de
 RapidOCR (unos ~15 MB) y los dejará cacheados localmente.
 
+### Acelerar el OCR con la tarjeta gráfica (Windows, opcional)
+
+El reconocimiento de texto puede correr en la GPU del equipo mediante
+DirectML (sirve con tarjetas NVIDIA, AMD o Intel, sin instalar CUDA).
+
+1. Ejecuta `run.bat` al menos una vez (crea el entorno virtual).
+2. Ejecuta `activar_gpu.bat`: instala `onnxruntime-directml`.
+3. Ejecuta `probar_gpu.bat`: mide CPU contra GPU en este equipo, verifica
+   que el texto reconocido sea igual y dice qué configuración conviene.
+4. Vuelve a iniciar `run.bat`. `GET /api/health` muestra en
+   `ocr_dispositivo` si el OCR quedó en `cpu` o en `gpu`.
+
+Si la GPU falla al cargar o durante el OCR, el sistema vuelve solo a CPU.
+Para quitar la GPU: `activar_gpu.bat --quitar`.
+
+Ajustes (variables de entorno, se pueden poner en `run.bat`):
+
+| Variable          | Valores                            | Para qué                                   |
+|-------------------|------------------------------------|---------------------------------------------|
+| `OCR_DISPOSITIVO` | `auto` (defecto), `gpu`, `cpu`     | Forzar CPU sin desinstalar nada             |
+| `OCR_GPU_MODULOS` | `det,cls,rec` (defecto)            | Qué modelos van a la GPU                    |
+| `OCR_GPU_ID`      | `0`, `1`, ...                      | Elegir tarjeta (por defecto la más potente) |
+
 ## Endpoints de la API
 
 | Método | Ruta                | Descripción                                          |
