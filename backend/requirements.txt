@@ -13,6 +13,8 @@ pydantic>=2.9.2
 sqlalchemy>=2.0.0
 python-jose[cryptography]>=3.3.0
 passlib[bcrypt]>=1.7.4
+# passlib 1.7.4 falla con bcrypt 5 (no se puede iniciar sesión)
+bcrypt>=4.0,<5
 # Generacion de informes PDF
 reportlab>=4.2.0
 # Manejo async de archivos

@@ -16,8 +16,8 @@ from . import matcher
 from .auth import get_current_user
 from .database import Comparacion, Usuario, get_db, get_storage_dir, init_db
 from .document_grouper import group_pages_into_documents
-from .excel_reader import parse_excel_report
-from .ocr_engine import extract_pdf
+from .excel_reader import parse_excel_report_detailed
+from .ocr_engine import count_pdf_pages, dispositivo_ocr, extract_pdf
 from .routers import auth_router, historial_router
 from sqlalchemy.orm import Session
 
