@@ -27,3 +27,6 @@ __pycache__/
 ~$*
 .DS_Store
 Thumbs.db
+
+# --- Configuración de GPU de cada equipo (la genera probar_gpu.bat) -------
+backend/gpu_config.json

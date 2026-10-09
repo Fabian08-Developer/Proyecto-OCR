@@ -60,9 +60,8 @@ def instalar() -> int:
         return 1
 
     print(
-        "\nListo. La próxima vez que inicies run.bat el OCR usará la GPU.\n"
-        "Para medir si realmente es más rápido en este equipo:\n"
-        "    python benchmark_gpu.py"
+        "\nListo. Ahora ejecuta probar_gpu.bat: comprueba que la GPU funciona en este\n"
+        "equipo y, si conviene, deja configurado el servidor para usarla."
     )
     return 0
 

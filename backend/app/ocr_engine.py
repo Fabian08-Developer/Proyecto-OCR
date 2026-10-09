@@ -13,12 +13,15 @@ ONNX en cada llamada es costoso; para leer varias páginas a la vez hay un
 pequeño grupo de motores (OCR_TRABAJADORES) que se prestan por página.
 
 Aceleración por GPU (opcional, solo Windows):
-  Si está instalado `onnxruntime-directml` (ver `activar_gpu.bat`), los
-  modelos de RapidOCR se ejecutan en la tarjeta gráfica vía DirectML. Si la
-  GPU falla al cargar o al inferir, se vuelve automáticamente a CPU.
-  Variables de entorno:
+  Con `onnxruntime-directml` instalado (ver `activar_gpu.bat`), los modelos
+  de RapidOCR pueden ejecutarse en la tarjeta gráfica vía DirectML. En modo
+  auto solo se usa la GPU si `probar_gpu.bat` la verificó en este equipo y
+  guardó la configuración en backend/gpu_config.json: un fallo interno de
+  DirectML cierra el proceso entero y no se puede atrapar. Si la GPU falla
+  con un error normal, se vuelve automáticamente a CPU.
+  Variables de entorno (tienen prioridad sobre gpu_config.json):
     OCR_DISPOSITIVO   auto (defecto) | gpu | cpu
-    OCR_GPU_MODULOS   modelos que van a la GPU: det,cls,rec (defecto: todos)
+    OCR_GPU_MODULOS   modelos que van a la GPU: det,cls,rec
     OCR_GPU_ID        índice del adaptador DirectML; sin definir se elige
                       la GPU de "alto rendimiento" (la dedicada en portátiles
                       con dos tarjetas).
@@ -27,6 +30,7 @@ Aceleración por GPU (opcional, solo Windows):
 from __future__ import annotations
 
 import io
+import json
 import logging
 import os
 import queue
@@ -35,6 +39,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Iterable, Iterator, List, Optional, Tuple
 
 import pymupdf as fitz  # PyMuPDF
@@ -45,11 +50,28 @@ from .ocr_refine import lector_rapidocr, refinar_lineas
 
 logger = logging.getLogger(__name__)
 
+# Configuración de GPU verificada por probar_gpu.bat en este equipo (no se versiona).
+CONFIG_GPU = Path(__file__).resolve().parent.parent / "gpu_config.json"
+
+
+def _leer_config_gpu() -> dict:
+    try:
+        return json.loads(CONFIG_GPU.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except Exception:  # noqa: BLE001 - un archivo dañado no debe impedir arrancar
+        logger.warning("No se pudo leer %s; se ignora.", CONFIG_GPU, exc_info=True)
+        return {}
+
+
+_config_gpu = _leer_config_gpu()
+
 # Páginas que se leen a la vez (cada una con su propio motor). Medido en un i5 de 12 hilos: 2 es
 # ~12 % más rápido que 1 y con 3 o 4 ya no mejora. OCR_TRABAJADORES=1 vuelve a leer de una en una.
+# Con GPU, probar_gpu.bat guarda el número que mejor le fue.
 try:
-    OCR_TRABAJADORES = max(1, int(os.environ.get("OCR_TRABAJADORES", "2")))
-except ValueError:
+    OCR_TRABAJADORES = max(1, int(os.environ.get("OCR_TRABAJADORES") or _config_gpu.get("trabajadores") or 2))
+except (TypeError, ValueError):
     OCR_TRABAJADORES = 2
 
 _ocr_engine = None
@@ -155,14 +177,23 @@ def _config_gpu_desde_entorno() -> tuple[list[str], Optional[int]]:
             logger.warning("OCR_DISPOSITIVO=gpu pero onnxruntime-directml no está instalado; se usa CPU.")
         return [], None
 
-    modulos = [m.strip() for m in os.environ.get("OCR_GPU_MODULOS", "det,cls,rec").lower().split(",") if m.strip()]
+    texto_modulos = os.environ.get("OCR_GPU_MODULOS", "").strip()
+    if texto_modulos:
+        modulos = [m.strip() for m in texto_modulos.lower().split(",") if m.strip()]
+    elif dispositivo == "gpu":
+        modulos = ["det", "cls", "rec"]
+    else:
+        # auto: solo lo que probar_gpu.bat verificó que funciona y conviene
+        modulos = list(_config_gpu.get("modulos") or [])
+        if not modulos:
+            logger.info("GPU disponible pero sin verificar (ejecuta probar_gpu.bat); se usa CPU.")
     desconocidos = [m for m in modulos if m not in _SESIONES_RAPIDOCR]
     if desconocidos:
-        logger.warning("OCR_GPU_MODULOS ignora valores desconocidos: %s", desconocidos)
+        logger.warning("Se ignoran módulos de GPU desconocidos: %s", desconocidos)
     modulos = [m for m in modulos if m in _SESIONES_RAPIDOCR]
 
-    gpu_id = os.environ.get("OCR_GPU_ID", "").strip()
-    return modulos, int(gpu_id) if gpu_id else None
+    gpu_id = os.environ.get("OCR_GPU_ID", "").strip() or _config_gpu.get("gpu_id")
+    return modulos, int(gpu_id) if gpu_id not in (None, "") else None
 
 
 def _descartar_gpu():
