@@ -12,7 +12,6 @@ Endpoints:
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse, Response
@@ -20,7 +19,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_user
-from ..database import Comparacion, Usuario, get_db
+from ..database import Comparacion, Usuario, get_db, ruta_en_storage
 from ..report_generator import generar_reporte_pdf
 
 logger = logging.getLogger("ocr_system")
@@ -65,6 +64,21 @@ def _get_comp_or_404(comp_id: str, user: Usuario, db: Session) -> Comparacion:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Comparacion no encontrada.")
     return comp
+
+
+def _borrar_archivo(ruta: str | None) -> bool:
+    """Borra un archivo guardado en storage/. Devuelve True si existia y se borro."""
+    path = ruta_en_storage(ruta)
+    if path is None:
+        return False
+    try:
+        path.unlink()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        logger.exception("No se pudo borrar el archivo %s", path)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -168,8 +182,8 @@ def descargar_pdf_original(
     comp = _get_comp_or_404(comp_id, current_user, db)
     if not comp.ruta_pdf:
         raise HTTPException(404, "El archivo PDF original no está almacenado.")
-    path = Path(comp.ruta_pdf)
-    if not path.exists():
+    path = ruta_en_storage(comp.ruta_pdf)
+    if path is None or not path.exists():
         raise HTTPException(404, "El archivo PDF original no se encuentra en el servidor.")
     return FileResponse(
         path=str(path),
@@ -188,8 +202,8 @@ def descargar_excel_original(
     comp = _get_comp_or_404(comp_id, current_user, db)
     if not comp.ruta_excel:
         raise HTTPException(404, "El archivo Excel original no está almacenado.")
-    path = Path(comp.ruta_excel)
-    if not path.exists():
+    path = ruta_en_storage(comp.ruta_excel)
+    if path is None or not path.exists():
         raise HTTPException(404, "El archivo Excel original no se encuentra en el servidor.")
     media = ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
              if comp.nombre_excel.endswith(".xlsx") else "application/vnd.ms-excel")
@@ -206,7 +220,12 @@ def eliminar_comparacion(
     current_user: Usuario = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Elimina una comparacion del historial (no elimina los archivos del disco)."""
+    """Elimina una comparacion del historial y los archivos originales (PDF y Excel) guardados en disco."""
     comp = _get_comp_or_404(comp_id, current_user, db)
+    ruta_pdf, ruta_excel = comp.ruta_pdf, comp.ruta_excel
     db.delete(comp)
     db.commit()
+    # Los archivos se borran despues de confirmar la baja en la base de datos: si algo fallara
+    # antes, el registro seguiria intacto con sus archivos. Contienen cedulas escaneadas.
+    _borrar_archivo(ruta_pdf)
+    _borrar_archivo(ruta_excel)

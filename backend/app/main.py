@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
@@ -14,7 +17,7 @@ from .auth import get_current_user
 from .database import Comparacion, Usuario, get_db, get_storage_dir, init_db
 from .document_grouper import group_pages_into_documents
 from .excel_reader import parse_excel_report
-from .ocr_engine import dispositivo_ocr, extract_pdf
+from .ocr_engine import extract_pdf
 from .routers import auth_router, historial_router
 from sqlalchemy.orm import Session
 
@@ -23,12 +26,30 @@ logger = logging.getLogger("ocr_system")
 
 app = FastAPI(title="Sistema OCR de Verificación de Documentos", version="0.2.0")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS: el frontend se sirve desde este mismo servidor, asi que NO hace falta ningun origen cruzado
+# y por defecto no se habilita ninguno (antes se aceptaba cualquier origen con "*").
+# Solo si se publica el frontend en otro dominio: OCR_CORS_ORIGINS="https://app.ejemplo.com,https://..."
+_cors_origins = [o.strip() for o in os.environ.get("OCR_CORS_ORIGINS", "").split(",") if o.strip()]
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+
+
+@app.middleware("http")
+async def cabeceras_de_seguridad(request, call_next):
+    """Cabeceras defensivas; las respuestas de la API (datos de cedulas) nunca se guardan en cache."""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+    return response
 
 # ---------------------------------------------------------------------------
 # Startup: inicializar la base de datos
@@ -48,6 +69,47 @@ app.include_router(historial_router.router)
 MAX_PDF_MB = 60
 MAX_EXCEL_MB = 10
 
+# ---------------------------------------------------------------------------
+# Control de OCR simultáneos
+# ---------------------------------------------------------------------------
+# El OCR usa todos los núcleos y cientos de MB: dos a la vez no terminan antes, solo se estorban.
+# Se procesa uno por vez (por proceso); hasta MAX_OCR_EN_COLA esperan su turno y el resto recibe
+# un 503 inmediato en lugar de quedarse colgado hasta que el navegador o el proxy se rindan.
+MAX_OCR_SIMULTANEOS = 1
+MAX_OCR_EN_COLA = 2
+
+_ocr_slots = threading.BoundedSemaphore(MAX_OCR_SIMULTANEOS)
+_ocr_count_lock = threading.Lock()
+_ocr_en_proceso = 0          # ejecutando + esperando turno
+
+
+@contextmanager
+def _ocr_turn():
+    """Reserva un turno de OCR; HTTP 503 si ya hay demasiados documentos en proceso."""
+    global _ocr_en_proceso
+    with _ocr_count_lock:
+        if _ocr_en_proceso >= MAX_OCR_SIMULTANEOS + MAX_OCR_EN_COLA:
+            raise HTTPException(
+                503,
+                "El servidor está procesando otros documentos. Intenta de nuevo en unos minutos.",
+                headers={"Retry-After": "60"},
+            )
+        _ocr_en_proceso += 1
+    try:
+        with _ocr_slots:
+            yield
+    finally:
+        with _ocr_count_lock:
+            _ocr_en_proceso -= 1
+
+
+def _validate_pdf(pdf_bytes: bytes) -> int:
+    """Comprueba el PDF antes de ocupar un turno de OCR; HTTP 422 si no es utilizable."""
+    try:
+        return count_pdf_pages(pdf_bytes)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
 
 def _read_upload(file: UploadFile, max_mb: int) -> bytes:
     content = file.file.read()
@@ -65,8 +127,11 @@ def health():
     return {"status": "ok", "ocr_dispositivo": dispositivo_ocr()}
 
 
+# Los endpoints que leen archivos u ocupan CPU son "def" (no "async def"): FastAPI los ejecuta en un
+# hilo aparte. Con "async def" el OCR bloqueaba el bucle de eventos y todo el servidor (login,
+# interfaz, /api/health) dejaba de responder mientras duraba.
 @app.post("/api/extract-pdf")
-async def api_extract_pdf(
+def api_extract_pdf(
     pdf: UploadFile = File(...),
     current_user: Usuario = Depends(get_current_user),
 ):
@@ -75,13 +140,15 @@ async def api_extract_pdf(
         raise HTTPException(400, "El archivo debe ser un PDF.")
 
     pdf_bytes = _read_upload(pdf, MAX_PDF_MB)
+    _validate_pdf(pdf_bytes)
 
-    t0 = time.time()
-    try:
-        pages = extract_pdf(pdf_bytes)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Fallo al ejecutar OCR sobre el PDF")
-        raise HTTPException(500, f"Error ejecutando OCR sobre el PDF: {exc}") from exc
+    with _ocr_turn():
+        t0 = time.time()
+        try:
+            pages = extract_pdf(pdf_bytes)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Fallo al ejecutar OCR sobre el PDF")
+            raise HTTPException(500, f"Error ejecutando OCR sobre el PDF: {exc}") from exc
 
     documents = group_pages_into_documents(pages)
     logger.info("OCR de %s páginas completado en %.1fs -> %s documentos",
@@ -95,7 +162,7 @@ async def api_extract_pdf(
 
 
 @app.post("/api/parse-excel")
-async def api_parse_excel(
+def api_parse_excel(
     excel: UploadFile = File(...),
     current_user: Usuario = Depends(get_current_user),
 ):
@@ -106,21 +173,23 @@ async def api_parse_excel(
     excel_bytes = _read_upload(excel, MAX_EXCEL_MB)
 
     try:
-        participants = parse_excel_report(excel_bytes, excel.filename)
+        result = parse_excel_report_detailed(excel_bytes, excel.filename)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Fallo al leer el Excel")
-        raise HTTPException(500, f"Error leyendo el Excel: {exc}") from exc
 
-    return {"total_participantes": len(participants), "participantes": [p.to_dict() for p in participants]}
+    participants = result.participantes
+    return {
+        "total_participantes": len(participants),
+        "participantes": [p.to_dict() for p in participants],
+        "advertencias": result.advertencias,
+    }
 
 
 # ---------------------------------------------------------------------------
 # Endpoint principal de comparacion (con autenticacion + guardado en BD)
 # ---------------------------------------------------------------------------
 @app.post("/api/comparar")
-async def api_comparar(
+def api_comparar(
     pdf: UploadFile = File(...),
     excel: UploadFile = File(...),
     current_user: Usuario = Depends(get_current_user),
@@ -139,23 +208,34 @@ async def api_comparar(
     pdf_bytes = _read_upload(pdf, MAX_PDF_MB)
     excel_bytes = _read_upload(excel, MAX_EXCEL_MB)
 
-    t0 = time.time()
+    # El Excel se valida PRIMERO: leerlo es instantáneo y el OCR puede tardar minutos,
+    # así que un Excel inválido se rechaza antes de gastar ese tiempo.
     try:
-        pages = extract_pdf(pdf_bytes)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Fallo al ejecutar OCR sobre el PDF")
-        raise HTTPException(500, f"Error ejecutando OCR sobre el PDF: {exc}") from exc
+        excel_result = parse_excel_report_detailed(excel_bytes, excel.filename)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    participants = excel_result.participantes
+    for aviso in excel_result.advertencias:
+        logger.warning("Excel '%s': %s", excel.filename, aviso)
+
+    n_paginas = _validate_pdf(pdf_bytes)
+    logger.info("PDF '%s' de %s página(s); esperando turno de OCR", pdf.filename, n_paginas)
+
+    with _ocr_turn():
+        t0 = time.time()          # el tiempo en cola no cuenta como tiempo de procesamiento
+        try:
+            pages = extract_pdf(pdf_bytes)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Fallo al ejecutar OCR sobre el PDF")
+            raise HTTPException(500, f"Error ejecutando OCR sobre el PDF: {exc}") from exc
 
     documents = group_pages_into_documents(pages)
     logger.info("OCR de %s páginas completado en %.1fs -> %s documentos",
                 len(pages), time.time() - t0, len(documents))
 
-    try:
-        participants = parse_excel_report(excel_bytes, excel.filename)
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
-
     comparison = matcher.compare(documents, participants)
+    # Se guarda dentro del resultado para que el historial y el informe también las muestren
+    comparison["advertencias_excel"] = excel_result.advertencias
     elapsed = round(time.time() - t0, 1)
 
     # -------------------------------------------------------------------

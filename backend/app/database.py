@@ -8,6 +8,8 @@ Modelos:
 from __future__ import annotations
 
 import json
+import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +21,10 @@ from sqlalchemy import (
     Integer, String, Text, create_engine
 )
 from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
+
+from . import password_policy
+
+logger = logging.getLogger("ocr_system")
 
 # ---------------------------------------------------------------------------
 # Configuracion del motor
@@ -72,6 +78,17 @@ class Usuario(Base):
     @staticmethod
     def hash_password(plain: str) -> str:
         return pwd_context.hash(plain)
+
+    @staticmethod
+    def verify_dummy(plain: str) -> None:
+        """Gasta el mismo tiempo que una verificación real (usuario inexistente): evita enumerar usuarios."""
+        global _DUMMY_HASH
+        if _DUMMY_HASH is None:
+            _DUMMY_HASH = pwd_context.hash("contrasena-ficticia-para-igualar-tiempos")
+        pwd_context.verify(plain, _DUMMY_HASH)
+
+
+_DUMMY_HASH: Optional[str] = None
 
 
 class Comparacion(Base):
@@ -131,28 +148,72 @@ def get_db():
 
 
 def init_db() -> None:
-    """Crea las tablas y el usuario admin por defecto si no existe."""
+    """
+    Crea las tablas y, si la base está vacía, el usuario administrador inicial.
+
+    No hay contraseña por defecto: se usa OCR_ADMIN_PASSWORD si está definida (y cumple la política)
+    o se genera una aleatoria que se muestra UNA sola vez en el registro de arranque.
+    Si alguna cuenta existente conserva la antigua contraseña "admin123", se avisa con claridad
+    (el inicio de sesión de esas cuentas queda bloqueado hasta que la cambien).
+    """
     Base.metadata.create_all(bind=engine)
 
     db: Session = SessionLocal()
     try:
-        admin = db.query(Usuario).filter(Usuario.username == "admin").first()
-        if not admin:
-            admin = Usuario(
+        if db.query(Usuario).count() == 0:
+            desde_entorno = os.environ.get("OCR_ADMIN_PASSWORD")
+            if desde_entorno:
+                motivo = password_policy.validar("admin", desde_entorno)
+                if motivo:
+                    raise RuntimeError(f"OCR_ADMIN_PASSWORD no es válida: {motivo}")
+                password = desde_entorno
+            else:
+                password = password_policy.generar()
+
+            db.add(Usuario(
                 username="admin",
-                password_hash=Usuario.hash_password("admin123"),
+                password_hash=Usuario.hash_password(password),
                 nombre="Administrador",
                 is_active=True,
-            )
-            db.add(admin)
+            ))
             db.commit()
-            import logging
-            logging.getLogger("ocr_system").info(
-                "Usuario 'admin' creado con contraseña 'admin123'. "
-                "Se recomienda cambiarla en cuanto sea posible."
-            )
+            if desde_entorno:
+                logger.warning("Usuario inicial 'admin' creado con la contraseña de OCR_ADMIN_PASSWORD.")
+            else:
+                logger.warning(
+                    "\n" + "=" * 64 +
+                    "\n  USUARIO INICIAL CREADO"
+                    "\n  usuario:    admin"
+                    "\n  contraseña: %s"
+                    "\n  Se muestra UNA sola vez. Anótala y cámbiala con:"
+                    "\n    python gestionar_usuarios.py cambiar-password admin"
+                    "\n" + "=" * 64, password
+                )
+            return
+
+        for user in db.query(Usuario).filter(Usuario.is_active.is_(True)).all():
+            if any(user.verify_password(p) for p in ("admin123",)):
+                logger.critical(
+                    "El usuario '%s' sigue usando la contraseña por defecto 'admin123' (pública). "
+                    "No podrá iniciar sesión hasta que la cambies:  python gestionar_usuarios.py "
+                    "cambiar-password %s", user.username, user.username
+                )
     finally:
         db.close()
+
+
+def ruta_en_storage(ruta: Optional[str]) -> Optional[Path]:
+    """
+    Ruta real de un archivo guardado, calculada SOLO con su nombre dentro de storage/.
+    Así no importa desde dónde se guardó el registro (otra máquina, otra carpeta) y un valor
+    manipulado en la base de datos no puede apuntar fuera de storage/.
+    """
+    if not ruta:
+        return None
+    nombre = Path(str(ruta).replace("\\", "/")).name
+    if not nombre or nombre in (".", ".."):
+        return None
+    return _STORAGE_DIR / nombre
 
 
 def get_storage_dir() -> Path:

@@ -1,0 +1,29 @@
+# --- Secretos --------------------------------------------------------------
+# Clave de firma de sesiones generada automáticamente (ver backend/app/auth.py)
+backend/.ocr_secret_key
+.env
+*.env
+
+# --- Datos personales ------------------------------------------------------
+# El sistema procesa cédulas escaneadas: ni la base de datos, ni los archivos subidos,
+# ni los PDF/Excel de muestra deben versionarse.
+backend/ocr_system.db
+*.db
+backend/storage/
+backend/uploads/
+*.pdf
+*.xls
+*.xlsx
+
+# --- Entorno y archivos generados ------------------------------------------
+backend/venv/
+venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# --- Temporales de editores / Office ---------------------------------------
+~$*
+.DS_Store
+Thumbs.db

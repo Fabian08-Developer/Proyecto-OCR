@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
@@ -233,6 +234,33 @@ def _cover_page(story: list, st, nombre_pdf: str, nombre_excel: str,
 
 
 # ---------------------------------------------------------------------------
+# Advertencias de lectura del Excel
+# ---------------------------------------------------------------------------
+def _excel_warnings(story: list, st, advertencias: list):
+    """Recuadro con lo que no se pudo leer del Excel (participantes omitidos o dudosos)."""
+    if not advertencias:
+        return
+    story.append(Paragraph("Advertencias de lectura del Excel", st["section"]))
+    story.append(HRFlowable(width="100%", thickness=1, color=COLOR_AMBER, spaceAfter=6))
+    story.append(Paragraph(
+        "Los participantes afectados pueden no figurar en los resultados de este informe.",
+        st["normal"],
+    ))
+    story.append(Spacer(1, 0.2 * cm))
+    rows = [[Paragraph(f"• {escape(str(a))}", st["cell"])] for a in advertencias]
+    t = Table(rows, colWidths=[18 * cm])
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fff8e6")),
+        ("BOX", (0, 0), (-1, -1), 0.5, COLOR_AMBER),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    story.append(t)
+    story.append(Spacer(1, 0.5 * cm))
+
+
+# ---------------------------------------------------------------------------
 # Tabla de resultados
 # ---------------------------------------------------------------------------
 def _results_table(story: list, st, resultados: list):
@@ -408,7 +436,8 @@ def generar_reporte_pdf(
     # 1. Portada
     _cover_page(story, st, nombre_pdf, nombre_excel, resumen, fecha_str, usuario, tiempo_segundos)
 
-    # 2. Tabla de resultados
+    # 2. Advertencias de lectura del Excel (si las hubo) y tabla de resultados
+    _excel_warnings(story, st, resultado.get("advertencias_excel") or [])
     _results_table(story, st, resultados)
 
     # 3. Sobrantes

@@ -26,11 +26,19 @@ const inputPdf = document.getElementById("input-pdf");
 const inputExcel = document.getElementById("input-excel");
 const filenamePdf = document.getElementById("filename-pdf");
 const filenameExcel = document.getElementById("filename-excel");
+const filesizePdf = document.getElementById("filesize-pdf");
+const filesizeExcel = document.getElementById("filesize-excel");
+const dzPdf = document.getElementById("dz-pdf");
+const dzExcel = document.getElementById("dz-excel");
+const filePdfBox = document.getElementById("file-pdf");
+const fileExcelBox = document.getElementById("file-excel");
 const btnProcesar = document.getElementById("btn-procesar");
 const progressPanel = document.getElementById("progress-panel");
+const progressElapsed = document.getElementById("progress-elapsed");
 const errorPanel = document.getElementById("error-panel");
 const errorMsg = document.getElementById("error-msg");
 const resultsPanel = document.getElementById("results-panel");
+const resultHero = document.getElementById("result-hero");
 const summaryCards = document.getElementById("summary-cards");
 const btnExportar = document.getElementById("btn-exportar");
 const btnGenerarInforme = document.getElementById("btn-generar-informe");
@@ -38,6 +46,7 @@ const resultIdBadge = document.getElementById("result-id-badge");
 const navUsername = document.getElementById("nav-username");
 const btnLogout = document.getElementById("btn-logout");
 const headerSubtitle = document.getElementById("header-subtitle");
+const stepper = document.getElementById("stepper");
 
 // Filtros
 const filterDoc = document.getElementById("filter-doc");
@@ -58,6 +67,7 @@ let filteredResultados = [];
 let filteredSobrantes = [];
 let filteredSinNumero = [];
 let activeTab = "resultados";
+let progressTimer = null;
 
 // ---------------------------------------------------------------------------
 // Inicializacion
@@ -78,6 +88,13 @@ let activeTab = "resultados";
       const detalle = JSON.parse(detalleStr);
       lastComparacionId = detalle.id || null;
       lastResponse = detalle;
+      const eyebrow = document.querySelector(".eyebrow");
+      if (eyebrow) eyebrow.textContent = "Comparación guardada";
+      // Vista de solo lectura: no hay nada que cargar; se ofrece volver o empezar otra verificación
+      document.getElementById("upload-panel")?.classList.add("hidden");
+      stepper?.classList.add("hidden");
+      document.getElementById("back-link")?.classList.remove("hidden");
+      document.getElementById("new-link")?.classList.remove("hidden");
       if (headerSubtitle) {
         headerSubtitle.textContent = `Visualizando comparación del ${detalle.fecha_comparacion || "historial"} · ${detalle.nombre_pdf || ""}`;
       }
@@ -86,6 +103,7 @@ let activeTab = "resultados";
       }
       resetFilters(false);
       renderResults(detalle);
+      setStep(3);
     }
   }
 })();
@@ -96,16 +114,65 @@ btnLogout?.addEventListener("click", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Pasos (stepper)
+// ---------------------------------------------------------------------------
+function setStep(current) {
+  stepper?.querySelectorAll(".step").forEach((li) => {
+    const n = Number(li.dataset.step);
+    li.classList.toggle("is-active", n === current);
+    li.classList.toggle("is-done", n < current);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Subida de archivos
 // ---------------------------------------------------------------------------
+const FILE_RULES = {
+  pdf:   { input: inputPdf,   ext: [".pdf"],          label: "PDF" },
+  excel: { input: inputExcel, ext: [".xls", ".xlsx"], label: "Excel (.xls o .xlsx)" },
+};
+
+function validateChosenFile(kind) {
+  const rule = FILE_RULES[kind];
+  const file = rule.input.files[0];
+  if (file && !rule.ext.some((e) => file.name.toLowerCase().endsWith(e))) {
+    UI.toast(`"${file.name}" no es válido: se esperaba un archivo ${rule.label}.`, "error");
+    rule.input.value = "";
+  }
+}
+
 function updateFileLabels() {
-  filenamePdf.textContent = inputPdf.files[0]?.name || "Ningún archivo seleccionado";
-  filenameExcel.textContent = inputExcel.files[0]?.name || "Ningún archivo seleccionado";
+  [
+    [inputPdf, filenamePdf, filesizePdf, dzPdf, filePdfBox],
+    [inputExcel, filenameExcel, filesizeExcel, dzExcel, fileExcelBox],
+  ].forEach(([input, nameEl, sizeEl, dz, box]) => {
+    const file = input.files[0];
+    nameEl.textContent = file ? file.name : "Ningún archivo seleccionado";
+    sizeEl.textContent = file ? UI.formatBytes(file.size) : "";
+    dz.classList.toggle("has-file", Boolean(file));
+    box.classList.toggle("hidden", !file);
+  });
   btnProcesar.disabled = !(inputPdf.files[0] && inputExcel.files[0]);
 }
 
-inputPdf.addEventListener("change", updateFileLabels);
-inputExcel.addEventListener("change", updateFileLabels);
+inputPdf.addEventListener("change", () => { validateChosenFile("pdf"); updateFileLabels(); });
+inputExcel.addEventListener("change", () => { validateChosenFile("excel"); updateFileLabels(); });
+
+// Quitar archivo (el botón vive dentro del <label>: se evita abrir el selector)
+[["remove-pdf", inputPdf], ["remove-excel", inputExcel]].forEach(([id, input]) => {
+  document.getElementById(id)?.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    input.value = "";
+    updateFileLabels();
+  });
+});
+
+// Resaltado al arrastrar (la propia entrada de archivo cubre la zona y recibe el "soltar")
+[dzPdf, dzExcel].forEach((dz) => {
+  ["dragenter", "dragover"].forEach((ev) => dz.addEventListener(ev, () => dz.classList.add("is-dragover")));
+  ["dragleave", "drop", "dragend"].forEach((ev) => dz.addEventListener(ev, () => dz.classList.remove("is-dragover")));
+});
 
 // ---------------------------------------------------------------------------
 // Tabs
@@ -114,6 +181,7 @@ function setActiveTab(tabName) {
   activeTab = tabName;
   document.querySelectorAll(".tab-btn").forEach((b) => {
     b.classList.toggle("active", b.dataset.tab === tabName);
+    b.setAttribute("aria-selected", b.dataset.tab === tabName ? "true" : "false");
   });
   document.querySelectorAll(".tab-content").forEach((c) => {
     c.classList.toggle("hidden", c.id !== `tab-${tabName}`);
@@ -135,8 +203,56 @@ const ESTADO_LABELS = {
   no_encontrado_en_pdf: "No encontrado en PDF",
 };
 
+// Escapa texto antes de insertarlo en innerHTML: nombres y observaciones vienen del Excel y del OCR
+// (datos que el usuario no controla) y no deben interpretarse como HTML.
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+
+// Valor listo para insertar en HTML: "—" si esta vacio y, si no, el texto escapado.
 function fmt(value) {
-  return value === null || value === undefined || value === "" ? "—" : value;
+  return value === null || value === undefined || value === "" ? "—" : escapeHtml(value);
+}
+
+function statusBadge(estado) {
+  return `<span class="badge ${escapeHtml(estado)}">${escapeHtml(ESTADO_LABELS[estado] || estado)}</span>`;
+}
+
+function similarityBar(value) {
+  if (value === null || value === undefined) return `<span class="cell-muted">—</span>`;
+  const pct = Math.max(0, Math.min(100, Math.round(value * 100)));
+  const tone = pct >= 85 ? "" : pct >= 72 ? "mid" : "low";
+  return `<span class="sim"><span class="sim-track"><span class="${tone}" style="width:${pct}%"></span></span><b>${pct}%</b></span>`;
+}
+
+// Nombre del Excel (principal) y, debajo, lo que leyó el OCR. Si las LETRAS difieren (no solo los
+// espacios que el OCR pega o separa) la línea del OCR se resalta: es una diferencia real a revisar.
+function personCell(nombreExcel, nombreOcr, fechaNac) {
+  const compact = (s) => normalizeText(s).replace(/\s+/g, "");
+  let ocrLine;
+  if (!nombreOcr) {
+    ocrLine = `<span class="ocr-line none"><span class="tag-ocr">OCR</span>Sin documento leído en el PDF</span>`;
+  } else {
+    const diff = compact(nombreExcel) !== compact(nombreOcr);
+    const nac = fechaNac ? ` · Nac. ${escapeHtml(fechaNac)}` : "";
+    ocrLine = `<span class="ocr-line ${diff ? "diff" : ""}" title="${diff ? "El nombre leído por el OCR difiere del Excel" : "Coincide con el Excel"}">` +
+      `<span class="tag-ocr">OCR</span>${escapeHtml(nombreOcr)}${nac}</span>`;
+  }
+  return `<strong>${fmt(nombreExcel)}</strong>${ocrLine}`;
+}
+
+function pageChips(pages) {
+  const list = Array.isArray(pages) ? pages : [];
+  if (!list.length) return `<span class="cell-muted">—</span>`;
+  return list.map((p) => `<span class="chip">p. ${escapeHtml(p)}</span>`).join("");
+}
+
+function emptyRow(cols, text) {
+  return `<tr><td colspan="${cols}" class="empty-state-cell">
+    <span class="empty-state-icon">${icon("search", 28)}</span>
+    <strong>Sin resultados</strong>${text}</td></tr>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -154,11 +270,26 @@ function normalizeDoc(str) {
 // ---------------------------------------------------------------------------
 // Procesamiento principal
 // ---------------------------------------------------------------------------
+function startProgressTimer() {
+  const t0 = Date.now();
+  progressElapsed.textContent = "00:00";
+  clearInterval(progressTimer);
+  progressTimer = setInterval(() => {
+    const s = Math.floor((Date.now() - t0) / 1000);
+    progressElapsed.textContent =
+      `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+  }, 1000);
+}
+
+function stopProgressTimer() { clearInterval(progressTimer); }
+
 async function procesar() {
   errorPanel.classList.add("hidden");
   resultsPanel.classList.add("hidden");
   progressPanel.classList.remove("hidden");
   btnProcesar.disabled = true;
+  setStep(2);
+  startProgressTimer();
 
   const formData = new FormData();
   formData.append("pdf", inputPdf.files[0]);
@@ -188,48 +319,141 @@ async function procesar() {
 
     resetFilters(false);
     renderResults(data);
+    setStep(3);
+    UI.toast("Verificación completada y guardada en el historial.", "success");
+    resultsPanel.scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (err) {
-    errorMsg.textContent = `Ocurrió un error: ${err.message}`;
+    errorMsg.textContent = err.message;
     errorPanel.classList.remove("hidden");
+    setStep(1);
   } finally {
+    stopProgressTimer();
     progressPanel.classList.add("hidden");
-    btnProcesar.disabled = false;
+    btnProcesar.disabled = !(inputPdf.files[0] && inputExcel.files[0]);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Render del resumen de tarjetas
+// Resultado principal: gráfico de dona + leyenda
+// ---------------------------------------------------------------------------
+const STATUS_ORDER = [
+  { key: "coincide",             field: "coinciden",            label: "Coinciden",              color: "var(--ok-dot)" },
+  { key: "nombre_no_coincide",   field: "nombre_no_coincide",   label: "Nombre no coincide",     color: "var(--warn-dot)" },
+  { key: "documento_incompleto", field: "documento_incompleto", label: "Datos incompletos",      color: "var(--inc-dot)" },
+  { key: "no_encontrado_en_pdf", field: "no_encontrado_en_pdf", label: "No encontrados en PDF",  color: "var(--bad-dot)" },
+];
+
+function renderHero(resumen) {
+  const total = resumen.total_excel || 0;
+  const ok = resumen.coinciden || 0;
+  const pct = total === 0 ? 0 : (ok === total ? 100 : Math.min(99, Math.round((ok * 100) / total)));
+  const toReview = Math.max(0, total - ok);
+
+  // Geometria del anillo (r = 48 en un viewBox de 120)
+  const C = 2 * Math.PI * 48;
+  const GAP = 3;
+  let acc = 0;
+  const segments = STATUS_ORDER.map((s) => {
+    const n = resumen[s.field] || 0;
+    const len = total ? (n / total) * C : 0;
+    const seg = { color: s.color, len, offset: acc, n };
+    acc += len;
+    return seg;
+  }).filter((s) => s.n > 0);
+  const single = segments.length === 1;
+
+  const circles = segments.map((s) => {
+    const visible = single ? s.len : Math.max(s.len - GAP, 0.5);
+    return `<circle class="ring-seg" cx="60" cy="60" r="48" stroke="${s.color}"
+      stroke-dasharray="0 ${C.toFixed(2)}" stroke-dashoffset="${(-s.offset).toFixed(2)}"
+      data-final="${visible.toFixed(2)} ${C.toFixed(2)}"></circle>`;
+  }).join("");
+
+  const headline = total > 0 && ok === total
+    ? `<b>Todos</b> los participantes fueron verificados`
+    : `<b>${ok} de ${total}</b> participantes verificados`;
+
+  const sub = total > 0 && ok === total
+    ? `<span class="tag" style="color:var(--ok)">${icon("check-circle", 17)}Sin diferencias entre el PDF y el Excel</span>`
+    : `<span class="tag">${icon("alert-triangle", 17)}${toReview} participante${toReview === 1 ? "" : "s"} requiere${toReview === 1 ? "" : "n"} revisión</span>
+       · ${resumen.total_pdf_documentos ?? 0} documentos leídos en el PDF`;
+
+  const legend = STATUS_ORDER.map((s) => {
+    const n = resumen[s.field] || 0;
+    const share = total ? Math.round((n / total) * 100) : 0;
+    return `<button type="button" class="legend-row" data-status="${s.key}" data-tab="resultados"
+        title="Clic para filtrar por «${escapeHtml(s.label)}»">
+      <span class="legend-dot"></span>
+      <span class="legend-label">${s.label}</span>
+      <span class="legend-count" data-count="${n}">0</span>
+      <span class="legend-bar"><span data-width="${share}"></span></span>
+    </button>`;
+  }).join("");
+
+  resultHero.innerHTML = `
+    <div class="donut" role="img" aria-label="${pct}% de coincidencia: ${ok} de ${total} participantes">
+      <svg viewBox="0 0 120 120" aria-hidden="true">
+        <circle class="ring-track" cx="60" cy="60" r="48"></circle>
+        ${circles}
+      </svg>
+      <div class="donut-center"><strong data-count="${pct}">0</strong><span>coincidencia</span></div>
+    </div>
+    <div class="hero-body">
+      <h2>${headline}</h2>
+      <p class="hero-sub">${sub}</p>
+      <div class="legend">${legend}</div>
+    </div>`;
+
+  // Animaciones de entrada (dos fotogramas para que la transicion parta de cero)
+  const reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    resultHero.querySelectorAll(".ring-seg").forEach((c) => c.setAttribute("stroke-dasharray", c.dataset.final));
+    resultHero.querySelectorAll(".legend-bar span").forEach((b) => { b.style.width = `${b.dataset.width}%`; });
+  }));
+  // El signo % lo pone el CSS (strong::after): countUp reescribe el texto del elemento en cada fotograma
+  resultHero.querySelectorAll("[data-count]").forEach((el) => {
+    const long = el.matches(".donut-center strong");
+    UI.countUp(el, Number(el.dataset.count), reduce ? 0 : (long ? 900 : 700));
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Tarjetas de apoyo
 // ---------------------------------------------------------------------------
 function renderSummary(resumen) {
+  const sobrantes = resumen.sobrantes_en_pdf ?? 0;
+  const sinNumero = resumen.documentos_sin_numero_detectado ?? 0;
   const cards = [
-    { label: "Registros en Excel",   value: resumen.total_excel,              tab: "resultados", status: "" },
-    { label: "Documentos en PDF",    value: resumen.total_pdf_documentos,      tab: "resultados", status: "" },
-    { label: "Coinciden",            value: resumen.coinciden,                 tab: "resultados", status: "coincide" },
-    { label: "Nombre no coincide",   value: resumen.nombre_no_coincide,        tab: "resultados", status: "nombre_no_coincide" },
-    { label: "Datos incompletos",    value: resumen.documento_incompleto,      tab: "resultados", status: "documento_incompleto" },
-    { label: "No encontrados en PDF",value: resumen.no_encontrado_en_pdf,      tab: "resultados", status: "no_encontrado_en_pdf" },
-    { label: "Sobrantes en PDF",     value: resumen.sobrantes_en_pdf,          tab: "sobrantes",  status: "" },
-    { label: "Sin número",           value: resumen.documentos_sin_numero_detectado, tab: "sin-numero", status: "" },
+    { label: "Registros en Excel",   value: resumen.total_excel ?? 0,           ic: "users",     tab: "resultados", tone: "" },
+    { label: "Documentos en PDF",    value: resumen.total_pdf_documentos ?? 0,  ic: "layers",    tab: "resultados", tone: "" },
+    { label: "Sobrantes en PDF",     value: sobrantes,                          ic: "file-plus", tab: "sobrantes",  tone: sobrantes > 0 ? "warn" : "" },
+    { label: "Sin número detectado", value: sinNumero,                          ic: "file-x",    tab: "sin-numero", tone: sinNumero > 0 ? "warn" : "" },
   ];
 
   summaryCards.innerHTML = cards.map((c) => `
-    <div class="summary-card clickable" data-tab="${c.tab}" data-status="${c.status}" title="Clic para filtrar">
-      <div class="value">${c.value ?? 0}</div>
-      <div class="label">${c.label}</div>
-    </div>`).join("");
+    <button type="button" class="summary-card clickable" data-tab="${c.tab}" data-status="" data-tone="${c.tone}" title="Clic para ver el detalle">
+      <span class="sc-icon">${icon(c.ic, 22)}</span>
+      <span class="sc-text">
+        <span class="value" data-count="${c.value}">0</span>
+        <span class="label">${c.label}</span>
+      </span>
+    </button>`).join("");
 
-  document.querySelectorAll(".summary-card.clickable").forEach((card) => {
-    card.addEventListener("click", () => {
-      const tab = card.dataset.tab;
-      const status = card.dataset.status;
-      if (tab) setActiveTab(tab);
-      if (status !== undefined) {
-        filterEstado.value = (filterEstado.value === status && status !== "") ? "" : status;
-      }
-      applyFilters();
-    });
-  });
+  summaryCards.querySelectorAll("[data-count]").forEach((el) => UI.countUp(el, Number(el.dataset.count), 700));
 }
+
+// Un solo manejador para tarjetas y leyenda (se crean de nuevo en cada resultado)
+resultsPanel.addEventListener("click", (ev) => {
+  const el = ev.target.closest(".summary-card.clickable, .legend-row");
+  if (!el) return;
+  const tab = el.dataset.tab;
+  const status = el.dataset.status;
+  if (tab) setActiveTab(tab);
+  if (status !== undefined) {
+    filterEstado.value = (filterEstado.value === status && status !== "") ? "" : status;
+  }
+  applyFilters();
+});
 
 // ---------------------------------------------------------------------------
 // Render de tablas
@@ -237,24 +461,19 @@ function renderSummary(resumen) {
 function renderResultsTable(resultados) {
   const tbody = document.querySelector("#table-resultados tbody");
   if (!resultados || resultados.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="7" class="empty-state-cell">
-      <span class="empty-state-icon">🔍</span>
-      No se encontraron participantes que coincidan con los filtros aplicados.</td></tr>`;
+    tbody.innerHTML = emptyRow(5, "No hay participantes que coincidan con los filtros aplicados.");
     return;
   }
   tbody.innerHTML = resultados.map((r) => {
-    const nombreOcr = r.ocr?.nombre_completo || "—";
-    const fechaNac = r.ocr?.fecha_nacimiento || "—";
-    const similitud = r.similitud_nombre !== null && r.similitud_nombre !== undefined
-      ? `${Math.round(r.similitud_nombre * 100)}%` : "—";
+    const nombreOcr = r.ocr?.nombre_completo || "";
+    const fechaNac = r.ocr?.fecha_nacimiento || "";
+    const obs = r.observaciones || "";
     return `<tr>
-      <td><span class="badge ${r.estado}">${ESTADO_LABELS[r.estado] || r.estado}</span></td>
-      <td><strong>${fmt(r.numero_documento)}</strong></td>
-      <td>${fmt(r.excel?.nombre_reportado)}</td>
-      <td>${fmt(nombreOcr)}</td>
-      <td>${fmt(fechaNac)}</td>
-      <td>${similitud}</td>
-      <td>${fmt(r.observaciones)}</td>
+      <td>${statusBadge(r.estado)}</td>
+      <td class="cell-doc">${fmt(r.numero_documento)}</td>
+      <td class="cell-person">${personCell(r.excel?.nombre_reportado, nombreOcr, fechaNac)}</td>
+      <td>${similarityBar(r.similitud_nombre)}</td>
+      <td><div class="cell-obs ${obs ? "is-alert" : ""}" title="${escapeHtml(obs)}">${fmt(obs)}</div></td>
     </tr>`;
   }).join("");
 }
@@ -262,31 +481,27 @@ function renderResultsTable(resultados) {
 function renderSobrantes(sobrantes) {
   const tbody = document.querySelector("#table-sobrantes tbody");
   if (!sobrantes || sobrantes.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="4" class="empty-state-cell">
-      <span class="empty-state-icon">🔍</span>
-      No se encontraron documentos sobrantes que coincidan con los filtros.</td></tr>`;
+    tbody.innerHTML = emptyRow(4, "No hay documentos sobrantes que coincidan con los filtros.");
     return;
   }
   tbody.innerHTML = sobrantes.map((d) => `<tr>
-    <td><strong>${fmt(d.numero_documento)}</strong></td>
-    <td>${fmt(d.nombre_completo)}</td>
-    <td>${fmt(d.fecha_nacimiento)}</td>
-    <td>${fmt((d.paginas_pdf || []).join(", "))}</td>
+    <td class="cell-doc">${fmt(d.numero_documento)}</td>
+    <td class="cell-name">${fmt(d.nombre_completo)}</td>
+    <td class="cell-muted">${fmt(d.fecha_nacimiento)}</td>
+    <td>${pageChips(d.paginas_pdf)}</td>
   </tr>`).join("");
 }
 
 function renderSinNumero(docs) {
   const tbody = document.querySelector("#table-sin-numero tbody");
   if (!docs || docs.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="3" class="empty-state-cell">
-      <span class="empty-state-icon">🔍</span>
-      No se encontraron documentos sin número que coincidan con los filtros.</td></tr>`;
+    tbody.innerHTML = emptyRow(3, "No hay documentos sin número que coincidan con los filtros.");
     return;
   }
   tbody.innerHTML = docs.map((d) => `<tr>
-    <td>${fmt(d.nombre_completo)}</td>
-    <td>${fmt(d.fecha_nacimiento)}</td>
-    <td>${fmt((d.paginas_pdf || []).join(", "))}</td>
+    <td class="cell-name">${fmt(d.nombre_completo)}</td>
+    <td class="cell-muted">${fmt(d.fecha_nacimiento)}</td>
+    <td>${pageChips(d.paginas_pdf)}</td>
   </tr>`).join("");
 }
 
@@ -381,7 +596,7 @@ function applyFilters() {
   if (countTabSobrantes)  countTabSobrantes.textContent  = filteredSobrantes.length;
   if (countTabSinNumero)  countTabSinNumero.textContent  = filteredSinNumero.length;
 
-  document.querySelectorAll(".summary-card").forEach((card) => {
+  document.querySelectorAll(".summary-card, .legend-row").forEach((card) => {
     const cs = card.dataset.status;
     card.classList.toggle("active-filter", Boolean(cs && statusQuery === cs));
   });
@@ -396,9 +611,34 @@ function resetFilters(apply = true) {
   if (apply && lastResponse) applyFilters();
 }
 
+// Avisos de lectura del Excel (filas omitidas, IDs dudosos, hojas ignoradas...).
+// Se escribe con textContent: el contenido viene del Excel y no debe interpretarse como HTML.
+function renderExcelWarnings(advertencias) {
+  const box = document.getElementById("excel-warnings");
+  const title = document.getElementById("excel-warnings-title");
+  const list = document.getElementById("excel-warnings-list");
+  if (!box || !title || !list) return;
+  list.replaceChildren();
+  if (!advertencias || advertencias.length === 0) {
+    box.classList.add("hidden");
+    return;
+  }
+  title.textContent = `Atención: el Excel tuvo ${advertencias.length} advertencia(s) de lectura. ` +
+    "Los participantes afectados pueden no estar en los resultados:";
+  advertencias.forEach((texto) => {
+    const li = document.createElement("li");
+    li.textContent = texto;
+    list.appendChild(li);
+  });
+  box.classList.remove("hidden");
+}
+
 function renderResults(data) {
+  renderExcelWarnings(data.advertencias_excel);
+  renderHero(data.resumen);
   renderSummary(data.resumen);
   applyFilters();
+  setActiveTab(activeTab);
   resultsPanel.classList.remove("hidden");
 }
 
@@ -407,7 +647,11 @@ function renderResults(data) {
 // ---------------------------------------------------------------------------
 function toCsvValue(value) {
   if (value === null || value === undefined) return "";
-  return `"${String(value).replace(/"/g, '""')}"`;
+  let text = String(value);
+  // Inyeccion de formulas: Excel/LibreOffice ejecutan celdas que empiezan con = + - @ (o tab/CR).
+  // Los nombres vienen de archivos subidos, asi que se neutraliza anteponiendo una comilla simple.
+  if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+  return `"${text.replace(/"/g, '""')}"`;
 }
 
 function exportarCsv() {
@@ -426,27 +670,24 @@ function exportarCsv() {
     ]);
   });
   const csv = rows.map((row) => row.map(toCsvValue).join(",")).join("\n");
-  const blob = new Blob([`\ufeff${csv}`], { type: "text/csv;charset=utf-8;" });
+  const blob = new Blob([`﻿${csv}`], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
   a.download = "resultados_verificacion.csv";
   a.click();
   URL.revokeObjectURL(url);
+  UI.toast(`Se exportaron ${list.length} registros a CSV.`, "success");
 }
 
 // ---------------------------------------------------------------------------
 // Generar informe PDF
 // ---------------------------------------------------------------------------
 async function generarInformePdf() {
-  if (!lastComparacionId) { alert("No hay comparación disponible para generar el informe."); return; }
+  if (!lastComparacionId) { UI.toast("No hay una comparación disponible para generar el informe.", "error"); return; }
 
   const btn = btnGenerarInforme;
-  const originalText = btn.innerHTML;
-  btn.innerHTML = `<span style="display:inline-flex;align-items:center;gap:8px">
-    <span style="width:14px;height:14px;border:2px solid rgba(255,255,255,0.4);border-top-color:white;border-radius:50%;animation:spin 0.8s linear infinite;display:inline-block"></span>
-    Generando...
-  </span>`;
+  btn.classList.add("is-loading");
   btn.disabled = true;
 
   try {
@@ -465,10 +706,11 @@ async function generarInformePdf() {
     a.download = `informe_ocr_${lastComparacionId.slice(0, 8)}.pdf`;
     a.click();
     URL.revokeObjectURL(url);
+    UI.toast("Informe PDF generado.", "success");
   } catch (err) {
-    alert(`Error: ${err.message}`);
+    UI.toast(`No se pudo generar el informe: ${err.message}`, "error");
   } finally {
-    btn.innerHTML = originalText;
+    btn.classList.remove("is-loading");
     btn.disabled = false;
   }
 }

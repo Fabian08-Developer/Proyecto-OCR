@@ -3,177 +3,253 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="light dark" />
   <title>Verificación OCR de Documentos de Identidad</title>
-  <link rel="stylesheet" href="style.css?v=3" />
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%233f56e2'/%3E%3Cstop offset='1' stop-color='%236a45dc'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Crect x='6' y='9' width='20' height='14' rx='3' fill='none' stroke='white' stroke-width='2'/%3E%3Ccircle cx='12' cy='15' r='2' fill='white'/%3E%3Cpath d='M17 14h5M17 18h3' stroke='white' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E" />
+  <script>
+    /* Tema antes del primer pintado (evita el parpadeo claro/oscuro) */
+    (function () {
+      try {
+        var t = localStorage.getItem("ocr_theme");
+        if (!t) t = window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) { document.documentElement.setAttribute("data-theme", "light"); }
+    })();
+  </script>
+  <link rel="stylesheet" href="style.css?v=5" />
 </head>
-<body>
-  <!-- Barra de navegacion -->
-  <nav class="navbar">
-    <div class="nav-brand">
-      <span class="nav-icon">🪪</span>
-      <span>Sistema OCR</span>
-    </div>
-    <div class="nav-links">
-      <a href="/index.html" class="nav-link active">Comparar</a>
-      <a href="/historial.html" class="nav-link">Historial</a>
-    </div>
-    <div class="nav-user">
-      <span class="nav-username" id="nav-username"></span>
-      <button class="btn-logout" id="btn-logout">Cerrar sesión</button>
-    </div>
-  </nav>
+<body data-page="comparar">
+  <div class="app">
 
-  <header>
-    <h1>Verificación OCR de Documentos de Identidad</h1>
-    <p class="subtitle" id="header-subtitle">Compara las cédulas escaneadas en un PDF contra un reporte de inscripción en Excel.</p>
-  </header>
+    <!-- Barra lateral -->
+    <aside class="sidebar" aria-label="Navegación principal">
+      <a class="brand" href="/index.html" aria-label="Verificación OCR, inicio">
+        <span class="brand-mark" data-icon="scan" data-size="22"></span>
+        <span class="brand-text"><strong>Verificación OCR</strong><small>Documentos de identidad</small></span>
+      </a>
 
-  <main>
-    <section class="upload-panel" id="upload-panel">
-      <div class="dropzone" id="dz-pdf">
-        <strong>PDF de documentos de identidad</strong>
-        <input type="file" id="input-pdf" accept="application/pdf" />
-        <span class="filename" id="filename-pdf">Ningún archivo seleccionado</span>
-      </div>
+      <nav class="nav">
+        <a href="/index.html" class="nav-link active" aria-current="page" title="Verificar"><span data-icon="scan"></span><span>Verificar</span></a>
+        <a href="/historial.html" class="nav-link" title="Historial"><span data-icon="history"></span><span>Historial</span></a>
+      </nav>
 
-      <div class="dropzone" id="dz-excel">
-        <strong>Excel de inscripción (.xls / .xlsx)</strong>
-        <input type="file" id="input-excel" accept=".xls,.xlsx" />
-        <span class="filename" id="filename-excel">Ningún archivo seleccionado</span>
-      </div>
-
-      <button id="btn-procesar" disabled>Procesar y comparar</button>
-      <p class="hint">El OCR puede tardar varios minutos dependiendo del número de páginas del PDF.</p>
-    </section>
-
-    <section id="progress-panel" class="hidden">
-      <div class="spinner"></div>
-      <p id="progress-text">Ejecutando OCR sobre el PDF, por favor espera...</p>
-    </section>
-
-    <section id="error-panel" class="hidden">
-      <p class="error-msg" id="error-msg"></p>
-    </section>
-
-    <section id="results-panel" class="hidden">
-      <div class="summary-cards" id="summary-cards"></div>
-
-      <!-- Barra de acciones de resultado -->
-      <div class="result-actions" id="result-actions">
-        <div class="result-actions-left">
-          <span class="result-id-badge" id="result-id-badge"></span>
+      <div class="sidebar-foot">
+        <div class="privacy-chip">
+          <span data-icon="shield-check"></span>
+          <span>OCR 100 % local<small>Tus documentos no salen de este equipo</small></span>
         </div>
-        <div class="result-actions-right">
-          <button id="btn-generar-informe" class="btn-report">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-            Generar informe PDF
+        <button type="button" class="theme-toggle" data-theme-toggle>
+          <span class="tt-label"><span data-theme-icon></span><span data-theme-label>Tema claro</span></span>
+          <span class="tt-switch" aria-hidden="true"></span>
+        </button>
+        <div class="user-card">
+          <span class="avatar" id="nav-avatar" aria-hidden="true">?</span>
+          <span class="user-meta"><span class="nav-username" id="nav-username"></span><small>Sesión activa</small></span>
+          <button type="button" class="icon-btn" id="btn-logout" data-icon="log-out" aria-label="Cerrar sesión" title="Cerrar sesión"></button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Contenido -->
+    <main class="content">
+      <header class="page-head">
+        <div>
+          <span class="eyebrow">Nueva verificación</span>
+          <h1>Verificación de documentos de identidad</h1>
+          <p class="subtitle" id="header-subtitle">Compara las cédulas escaneadas en un PDF contra tu reporte de inscripción en Excel.</p>
+        </div>
+        <div class="head-tools">
+          <a class="btn hidden" id="back-link" href="/historial.html"><span class="flip" data-icon="arrow-right" data-size="17"></span>Volver al historial</a>
+          <a class="btn btn-primary hidden" id="new-link" href="/index.html"><span data-icon="plus" data-size="17"></span>Nueva verificación</a>
+        </div>
+      </header>
+
+      <ol class="stepper" id="stepper" aria-label="Progreso de la verificación">
+        <li class="step is-active" data-step="1"><span class="step-dot">1</span><span class="step-label">Cargar archivos</span></li>
+        <li class="step" data-step="2"><span class="step-dot">2</span><span class="step-label">Analizar con OCR</span></li>
+        <li class="step" data-step="3"><span class="step-dot">3</span><span class="step-label">Revisar resultados</span></li>
+      </ol>
+
+      <!-- Carga de archivos -->
+      <section class="card upload-panel" id="upload-panel">
+        <div class="upload-grid">
+          <label class="dropzone" id="dz-pdf" data-kind="pdf">
+            <input type="file" id="input-pdf" accept="application/pdf,.pdf" />
+            <span class="dz-icon" data-icon="file-text" data-size="26"></span>
+            <span class="dz-title">PDF de documentos de identidad</span>
+            <span class="dz-desc">Cédulas escaneadas (frente y reverso). Tamaño máximo 60 MB.</span>
+            <span class="dz-cta"><span data-icon="upload" data-size="16"></span>Seleccionar o arrastrar el PDF</span>
+            <span class="dz-file hidden" id="file-pdf">
+              <span class="dz-file-icon" data-icon="file-text" data-size="20"></span>
+              <span class="dz-file-meta"><span class="filename" id="filename-pdf">Ningún archivo seleccionado</span><span class="dz-file-size" id="filesize-pdf"></span></span>
+              <button type="button" class="icon-btn dz-remove" id="remove-pdf" data-icon="x" data-size="16" aria-label="Quitar el PDF" title="Quitar archivo"></button>
+            </span>
+          </label>
+
+          <label class="dropzone" id="dz-excel" data-kind="excel">
+            <input type="file" id="input-excel" accept=".xls,.xlsx" />
+            <span class="dz-icon" data-icon="table" data-size="26"></span>
+            <span class="dz-title">Excel de inscripción</span>
+            <span class="dz-desc">Reporte de inscritos en formato .xls o .xlsx. Se leen todas las hojas.</span>
+            <span class="dz-cta"><span data-icon="upload" data-size="16"></span>Seleccionar o arrastrar el Excel</span>
+            <span class="dz-file hidden" id="file-excel">
+              <span class="dz-file-icon" data-icon="table" data-size="20"></span>
+              <span class="dz-file-meta"><span class="filename" id="filename-excel">Ningún archivo seleccionado</span><span class="dz-file-size" id="filesize-excel"></span></span>
+              <button type="button" class="icon-btn dz-remove" id="remove-excel" data-icon="x" data-size="16" aria-label="Quitar el Excel" title="Quitar archivo"></button>
+            </span>
+          </label>
+        </div>
+
+        <div class="upload-actions">
+          <button type="button" id="btn-procesar" class="btn btn-primary btn-lg" disabled>
+            <span data-icon="zap" data-size="18"></span>Procesar y comparar
           </button>
-          <button id="btn-exportar">Exportar CSV</button>
+          <p class="hint"><span data-icon="clock" data-size="16"></span>El OCR puede tardar varios minutos según el número de páginas.</p>
         </div>
-      </div>
+      </section>
 
-      <div class="filters-container">
-        <div class="filters-header">
-          <div class="filters-title">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="11" cy="11" r="8"></circle>
-              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-            </svg>
-            <span>Filtros de búsqueda</span>
+      <!-- Progreso -->
+      <section id="progress-panel" class="hidden" role="status" aria-live="polite">
+        <div class="progress-card">
+          <div class="scan-art" aria-hidden="true">
+            <div class="scan-doc">
+              <span class="scan-photo"></span>
+              <span class="scan-line l1"></span><span class="scan-line l2"></span><span class="scan-line l3"></span><span class="scan-line l4"></span>
+              <span class="scan-beam"></span>
+            </div>
           </div>
-          <div class="filter-counter-badge" id="filter-counter">Mostrando todos los registros</div>
+          <div class="progress-info">
+            <h2>Analizando tus documentos</h2>
+            <p id="progress-text">Ejecutando OCR sobre el PDF. Cada página se lee de forma local y privada.</p>
+            <div class="progress-bar" aria-hidden="true"><span></span></div>
+            <div class="progress-meta">
+              <span class="clock"><span data-icon="timer" data-size="16"></span>Tiempo transcurrido <strong id="progress-elapsed">00:00</strong></span>
+              <span>El resultado quedará guardado en el historial al terminar.</span>
+            </div>
+          </div>
         </div>
-        <div class="filters-grid">
-          <div class="filter-field">
-            <label for="filter-doc">N° Documento</label>
-            <div class="input-wrapper">
-              <input type="text" id="filter-doc" placeholder="Buscar por documento..." autocomplete="off" />
-              <button type="button" class="btn-input-clear" data-target="filter-doc" title="Borrar">✕</button>
-            </div>
-          </div>
+      </section>
 
-          <div class="filter-field">
-            <label for="filter-nombre">Nombre o Apellido</label>
-            <div class="input-wrapper">
-              <input type="text" id="filter-nombre" placeholder="Buscar por nombre o apellido..." autocomplete="off" />
-              <button type="button" class="btn-input-clear" data-target="filter-nombre" title="Borrar">✕</button>
-            </div>
+      <!-- Error -->
+      <section id="error-panel" class="hidden" role="alert">
+        <div class="alert alert-danger">
+          <span class="alert-icon" data-icon="alert-triangle" data-size="20"></span>
+          <div>
+            <strong>No se pudo completar la verificación</strong>
+            <p class="error-msg" id="error-msg"></p>
           </div>
+        </div>
+      </section>
 
-          <div class="filter-field">
-            <label for="filter-estado">Estado de validación</label>
-            <div class="select-wrapper">
-              <select id="filter-estado">
-                <option value="">Todos los estados</option>
-                <option value="coincide">Coincide</option>
-                <option value="nombre_no_coincide">Nombre no coincide</option>
-                <option value="documento_incompleto">Datos incompletos</option>
-                <option value="no_encontrado_en_pdf">No encontrado en PDF</option>
-              </select>
-            </div>
+      <!-- Resultados -->
+      <section id="results-panel" class="hidden">
+        <div class="excel-warnings hidden" id="excel-warnings" role="alert">
+          <span class="alert-icon" data-icon="alert-triangle" data-size="20"></span>
+          <div class="ew-body">
+            <strong id="excel-warnings-title"></strong>
+            <ul id="excel-warnings-list"></ul>
           </div>
+        </div>
 
-          <div class="filter-actions">
-            <button type="button" id="btn-clear-filters" class="btn-secondary" title="Restablecer todos los filtros">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
-              Limpiar
+        <div class="result-hero" id="result-hero"></div>
+
+        <div class="summary-cards" id="summary-cards"></div>
+
+        <div class="result-actions" id="result-actions">
+          <div class="result-actions-left">
+            <span class="result-id-badge" id="result-id-badge"></span>
+          </div>
+          <div class="result-actions-right">
+            <button type="button" id="btn-generar-informe" class="btn btn-primary">
+              <span data-icon="file-down" data-size="17"></span>Generar informe PDF
+            </button>
+            <button type="button" id="btn-exportar" class="btn">
+              <span data-icon="download" data-size="17"></span>Exportar CSV
             </button>
           </div>
         </div>
-      </div>
 
-      <div class="tabs">
-        <button class="tab-btn active" data-tab="resultados">Comparación <span class="tab-count" id="count-tab-resultados"></span></button>
-        <button class="tab-btn" data-tab="sobrantes">Sobrantes en PDF <span class="tab-count" id="count-tab-sobrantes"></span></button>
-        <button class="tab-btn" data-tab="sin-numero">Sin número detectado <span class="tab-count" id="count-tab-sin-numero"></span></button>
-      </div>
+        <div class="toolbar card" id="filters">
+          <div class="field">
+            <span data-icon="hash" data-size="17"></span>
+            <input type="text" id="filter-doc" placeholder="Buscar por documento" autocomplete="off" aria-label="Filtrar por número de documento" />
+            <button type="button" class="btn-input-clear" data-target="filter-doc" data-icon="x" data-size="14" aria-label="Borrar filtro de documento" title="Borrar"></button>
+          </div>
+          <div class="field">
+            <span data-icon="search" data-size="17"></span>
+            <input type="text" id="filter-nombre" placeholder="Buscar por nombre o apellido" autocomplete="off" aria-label="Filtrar por nombre o apellido" />
+            <button type="button" class="btn-input-clear" data-target="filter-nombre" data-icon="x" data-size="14" aria-label="Borrar filtro de nombre" title="Borrar"></button>
+          </div>
+          <div class="field">
+            <span data-icon="filter" data-size="17"></span>
+            <select id="filter-estado" aria-label="Filtrar por estado de validación">
+              <option value="">Todos los estados</option>
+              <option value="coincide">Coincide</option>
+              <option value="nombre_no_coincide">Nombre no coincide</option>
+              <option value="documento_incompleto">Datos incompletos</option>
+              <option value="no_encontrado_en_pdf">No encontrado en PDF</option>
+            </select>
+          </div>
+          <button type="button" id="btn-clear-filters" class="btn btn-ghost" title="Restablecer todos los filtros">
+            <span data-icon="rotate-ccw" data-size="16"></span>Limpiar
+          </button>
+          <span class="filter-counter-badge" id="filter-counter" aria-live="polite">Mostrando todos los registros</span>
+        </div>
 
-      <div id="tab-resultados" class="tab-content">
-        <table id="table-resultados">
-          <thead>
-            <tr>
-              <th>Estado</th>
-              <th>N° Documento</th>
-              <th>Nombre (Excel)</th>
-              <th>Nombre (OCR)</th>
-              <th>Fecha Nac. (OCR)</th>
-              <th>Similitud</th>
-              <th>Observaciones</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
+        <div class="tabs" role="tablist">
+          <button type="button" class="tab-btn active" data-tab="resultados" role="tab">Comparación <span class="tab-count" id="count-tab-resultados"></span></button>
+          <button type="button" class="tab-btn" data-tab="sobrantes" role="tab">Sobrantes en PDF <span class="tab-count" id="count-tab-sobrantes"></span></button>
+          <button type="button" class="tab-btn" data-tab="sin-numero" role="tab">Sin número detectado <span class="tab-count" id="count-tab-sin-numero"></span></button>
+        </div>
 
-      <div id="tab-sobrantes" class="tab-content hidden">
-        <table id="table-sobrantes">
-          <thead>
-            <tr>
-              <th>N° Documento (OCR)</th>
-              <th>Nombre (OCR)</th>
-              <th>Fecha Nac.</th>
-              <th>Páginas PDF</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
+        <div id="tab-resultados" class="tab-content">
+          <table id="table-resultados">
+            <thead>
+              <tr>
+                <th scope="col">Estado</th>
+                <th scope="col">N° Documento</th>
+                <th scope="col">Participante <span class="th-sub">Excel · lectura OCR</span></th>
+                <th scope="col">Similitud</th>
+                <th scope="col">Observaciones</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
 
-      <div id="tab-sin-numero" class="tab-content hidden">
-        <table id="table-sin-numero">
-          <thead>
-            <tr>
-              <th>Nombre (OCR)</th>
-              <th>Fecha Nac.</th>
-              <th>Páginas PDF</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
-    </section>
-  </main>
+        <div id="tab-sobrantes" class="tab-content hidden">
+          <table id="table-sobrantes">
+            <thead>
+              <tr>
+                <th scope="col">N° Documento (OCR)</th>
+                <th scope="col">Nombre (OCR)</th>
+                <th scope="col">Fecha Nac.</th>
+                <th scope="col">Páginas PDF</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
 
-  <script src="app.js?v=3"></script>
+        <div id="tab-sin-numero" class="tab-content hidden">
+          <table id="table-sin-numero">
+            <thead>
+              <tr>
+                <th scope="col">Nombre (OCR)</th>
+                <th scope="col">Fecha Nac.</th>
+                <th scope="col">Páginas PDF</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <script src="ui.js?v=5"></script>
+  <script src="app.js?v=5"></script>
 </body>
 </html>
