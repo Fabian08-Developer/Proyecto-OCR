@@ -37,7 +37,7 @@ import queue
 import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Iterator, List, Optional, Tuple
@@ -80,6 +80,9 @@ _creacion_lock = threading.Lock()  # el ajuste temporal de RapidOCR no admite cr
 
 _ocr_dispositivo = "cpu"  # descripción legible de dónde corre el OCR
 _gpu_descartada = False   # True tras un fallo de la GPU: desde ahí todo va a CPU
+# DirectML cierra el proceso (access violation) si dos hilos leen en la GPU a la vez,
+# aunque cada uno tenga su propio motor: las lecturas en GPU van de una en una.
+_gpu_lock = threading.Lock()
 
 DML_EP = "DmlExecutionProvider"
 
@@ -328,6 +331,11 @@ def pdf_to_images(pdf_bytes: bytes, dpi: int = 300) -> List[Image.Image]:
 def run_ocr_on_image(image: Image.Image, engine=None) -> PageResult:
     """Ejecuta RapidOCR sobre una imagen PIL y arma el PageResult (con `engine` o el motor común)."""
     engine = engine or get_ocr_engine()
+    with _gpu_lock if getattr(engine, "_en_gpu", False) else nullcontext():
+        return _leer_imagen(image, engine)
+
+
+def _leer_imagen(image: Image.Image, engine) -> PageResult:
     img_array = np.array(image)
 
     try:

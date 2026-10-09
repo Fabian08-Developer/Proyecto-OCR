@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
+import os
 import queue
 import subprocess
 import sys
@@ -91,7 +92,10 @@ def lanzar(nombre: str, modulos: list, trabajadores: int, args) -> dict | None:
 
     print(f"\n[{nombre}]", flush=True)
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900)
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
     except subprocess.TimeoutExpired:
         print("  FALLÓ: tardó más de 15 minutos.")
         return None
